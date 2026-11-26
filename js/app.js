@@ -15,7 +15,7 @@ import {
 } from "./geometry.js";
 import { DEFAULT_TEMPLATE, normalizeTemplate, renderFlag } from "./label-template.js";
 import { autoFit, fitCircle3D, fitLine, fitType, formatFit } from "./fit.js";
-import { buildMesh, growRegion, regionSamples } from "./mesh-select.js";
+import { brushSelect, buildMesh, growRegion, regionSamples } from "./mesh-select.js";
 
 // Anchors and geometries are stored in the original OBJ coordinate system.
 // The mesh is not moved, so a raycast hit can be saved as-is.
@@ -85,6 +85,14 @@ const els = {
   fitSummary: document.getElementById("fit-summary"),
   fitOk: document.getElementById("fit-ok"),
   fitCancel: document.getElementById("fit-cancel"),
+  method: document.getElementById("method"),
+  patchTools: document.getElementById("patch-tools"),
+  brushTools: document.getElementById("brush-tools"),
+  brushRadius: document.getElementById("brush-radius"),
+  brushLabel: document.getElementById("brush-label"),
+  brushErase: document.getElementById("brush-erase"),
+  brushUndo: document.getElementById("brush-undo"),
+  brushClear: document.getElementById("brush-clear"),
   templateForm: document.getElementById("template-form"),
   refreshSeconds: document.getElementById("refresh-seconds"),
 };
@@ -101,6 +109,12 @@ const state = {
   selectedGeometryId: null,
   tool: "point",
   growAngle: 18,
+  method: "patch",
+  brushRadius: 3,
+  brushErase: false,
+  brushSet: new Set(),
+  brushStrokes: [],
+  brushStroke: null,
   preview: null,
   draftPoints: [],
   filter: "25",
@@ -158,6 +172,7 @@ async function main() {
   state.setup = clone(state.saved);
   state.model = model;
   indexLoadedModel(model);
+  if (params.has("probe")) window.__probe = probeApi();
   cameraIsSaved = Boolean(state.setup.camera);
   syncChrome();
   resizeRenderer();
@@ -271,6 +286,20 @@ function bindUi() {
   });
   els.fitOk.addEventListener("click", confirmPreview);
   els.fitCancel.addEventListener("click", cancelPreview);
+  els.method.addEventListener("change", () => setMethod(els.method.value));
+  els.brushRadius.addEventListener("input", () => {
+    state.brushRadius = Number(els.brushRadius.value);
+    els.brushLabel.textContent = `${state.brushRadius.toLocaleString("de-DE")} mm`;
+  });
+  els.brushErase.addEventListener("change", () => {
+    state.brushErase = els.brushErase.checked;
+  });
+  els.brushUndo.addEventListener("click", undoBrushStroke);
+  els.brushClear.addEventListener("click", clearBrush);
+  els.stage.addEventListener("pointerdown", onBrushPointerDown, true);
+  els.stage.addEventListener("pointermove", onBrushPointerMove);
+  els.stage.addEventListener("pointerup", endBrushStroke);
+  els.stage.addEventListener("pointercancel", endBrushStroke);
   els.templateForm.addEventListener("change", readTemplateForm);
   els.templateForm.addEventListener("input", readTemplateForm);
   els.refreshSeconds.addEventListener("change", () => {
@@ -333,6 +362,14 @@ function initViewer() {
   scene.add(rim);
   geometryRoot = new THREE.Group();
   scene.add(geometryRoot);
+  const brushGeometry = new THREE.BufferGeometry();
+  state.brushDots = new THREE.Points(
+    brushGeometry,
+    new THREE.PointsMaterial({ color: 0xffb000, size: 7, sizeAttenuation: false, depthTest: false, depthWrite: false }),
+  );
+  state.brushDots.frustumCulled = false;
+  state.brushDots.renderOrder = 10;
+  scene.add(state.brushDots);
   controls = new OrbitControls(camera, els.view);
   controls.enableDamping = !reduceMotion;
   controls.dampingFactor = 0.08;
@@ -726,6 +763,7 @@ function beginEdit() {
   state.setup = clone(state.saved);
   document.body.classList.add("is-editing");
   els.editor.hidden = false;
+  setMethod(els.method?.value || state.method);
   syncChrome();
   syncEditor();
   resizeRenderer();
@@ -748,6 +786,7 @@ function finishEdit() {
   state.draftPoints = [];
   document.body.classList.remove("is-editing");
   els.editor.hidden = true;
+  setMethod("patch");
   syncChrome();
   updateHint();
   updateLeaders();
@@ -776,6 +815,7 @@ function discardEdit() {
   if (state.setup.camera) applyCamera(state.setup.camera);
   document.body.classList.remove("is-editing");
   els.editor.hidden = true;
+  setMethod("patch");
   rebuildGeometries();
   renderFlags();
   autoPlace();
@@ -814,6 +854,7 @@ function onResetClick() {
   cameraIsSaved = Boolean(state.setup.camera);
   document.body.classList.remove("is-editing");
   els.editor.hidden = true;
+  setMethod("patch");
   if (state.setup.camera) applyCamera(state.setup.camera);
   else if (state.model) frameModel(state.model, measureFlagBand());
   rebuildGeometries();
@@ -1208,13 +1249,150 @@ function onViewPointerUp(event) {
   const dx = event.clientX - pointerDown.x;
   const dy = event.clientY - pointerDown.y;
   pointerDown = null;
-  if (!state.edit || dx * dx + dy * dy > 36) return;
+  if (!state.edit || state.method === "brush" || dx * dx + dy * dy > 36) return;
   const hit = pickSurface(event);
   if (!hit) {
     toast(UI.pickMiss);
     return;
   }
   onSurfaceClick(hit);
+}
+
+function setMethod(method) {
+  state.method = method === "brush" ? "brush" : "patch";
+  els.brushTools.hidden = state.method !== "brush";
+  els.patchTools.hidden = state.method === "brush";
+  document.body.classList.toggle("is-brush", state.edit && state.method === "brush");
+  if (!controls) return;
+  controls.mouseButtons.LEFT = state.method === "brush" ? THREE.MOUSE.PAN : THREE.MOUSE.ROTATE;
+  controls.mouseButtons.MIDDLE = THREE.MOUSE.DOLLY;
+  controls.mouseButtons.RIGHT = state.method === "brush" ? THREE.MOUSE.ROTATE : THREE.MOUSE.PAN;
+}
+
+function onBrushPointerDown(event) {
+  if (!state.edit || state.method !== "brush" || event.button !== 0 || event.altKey) return;
+  event.stopImmediatePropagation();
+  event.preventDefault();
+  if (els.stage.setPointerCapture) {
+    try { els.stage.setPointerCapture(event.pointerId); } catch { /* synthetic event */ }
+  }
+  state.brushStroke = [];
+  paintBrush(event);
+}
+
+function onBrushPointerMove(event) {
+  if (!state.brushStroke) return;
+  paintBrush(event);
+}
+
+function endBrushStroke() {
+  if (!state.brushStroke) return;
+  if (state.brushStroke.length) state.brushStrokes.push(state.brushStroke);
+  state.brushStroke = null;
+}
+
+function paintBrush(event) {
+  const hit = pickSurface(event);
+  if (!hit || !state.meshIndex) return;
+  const ids = brushSelect(
+    state.meshIndex,
+    [hit.point.x, hit.point.y, hit.point.z],
+    state.brushRadius,
+    [hit.normal.x, hit.normal.y, hit.normal.z],
+  );
+  const erase = state.brushErase || event.shiftKey;
+  for (const id of ids) {
+    const marked = state.brushSet.has(id);
+    if (!erase && !marked) {
+      state.brushSet.add(id);
+      state.brushStroke.push(id);
+    } else if (erase && marked) {
+      state.brushSet.delete(id);
+      state.brushStroke.push(-id - 1);
+    }
+  }
+  updateBrushDots();
+  scheduleBrushFit();
+}
+
+function undoBrushStroke() {
+  const stroke = state.brushStrokes.pop();
+  if (!stroke) {
+    toast("Nichts zum Rückgängigmachen.");
+    return;
+  }
+  for (let i = stroke.length - 1; i >= 0; i -= 1) {
+    const code = stroke[i];
+    if (code >= 0) state.brushSet.delete(code);
+    else state.brushSet.add(-code - 1);
+  }
+  updateBrushDots();
+  scheduleBrushFit();
+}
+
+function clearBrush() {
+  state.brushSet.clear();
+  state.brushStrokes = [];
+  state.brushStroke = null;
+  state.preview = null;
+  els.fitPreview.hidden = true;
+  updateBrushDots();
+  rebuildGeometries();
+}
+
+function updateBrushDots() {
+  if (!state.brushDots || !state.meshIndex) return;
+  const ids = [...state.brushSet];
+  const array = new Float32Array(Math.max(ids.length, 1) * 3);
+  ids.forEach((id, index) => {
+    const point = state.meshIndex.vertices[id];
+    array[index * 3] = point[0];
+    array[index * 3 + 1] = point[1];
+    array[index * 3 + 2] = point[2];
+  });
+  state.brushDots.geometry.setAttribute("position", new THREE.BufferAttribute(array, 3));
+  state.brushDots.geometry.setDrawRange(0, ids.length);
+  state.brushDots.geometry.computeBoundingSphere();
+  state.brushDots.visible = ids.length > 0;
+}
+
+function scheduleBrushFit() {
+  window.clearTimeout(state.brushFitTimer);
+  state.brushFitTimer = window.setTimeout(runBrushFit, 150);
+}
+
+function runBrushFit() {
+  if (!state.meshIndex || !state.brushSet.size) {
+    state.preview = null;
+    els.fitPreview.hidden = true;
+    rebuildGeometries();
+    return;
+  }
+  const points = [];
+  const normals = [];
+  for (const id of state.brushSet) {
+    points.push(state.meshIndex.vertices[id]);
+    normals.push(state.meshIndex.vertexNormals[id]);
+  }
+  try {
+    const fit = fitSelection(points, normals);
+    state.preview = geometryFromFit(fit, points);
+    els.fitSummary.textContent = `${formatFit(fit)} · ${fit.n} Punkte`;
+    els.fitPreview.hidden = false;
+    rebuildGeometries();
+  } catch (error) {
+    state.preview = null;
+    els.fitSummary.textContent = error.message || UI.geoBad;
+    els.fitPreview.hidden = false;
+    rebuildGeometries();
+  }
+}
+
+function fitSelection(points, normals) {
+  if (state.tool === "Auto") return autoFit(points, normals).best;
+  if (state.tool === "Kreis") return fitCircle3D(points, normals[0]);
+  if (state.tool === "Linie") return fitLine(points);
+  return fitType(state.tool, points, normals);
 }
 
 function onSurfaceClick(hit) {
@@ -1245,15 +1423,9 @@ function onSurfaceClick(hit) {
       toast("Zu wenige Punkte in der Auswahl.");
       return;
     }
-    const fit = state.tool === "Auto"
-      ? autoFit(samples.points, samples.normals).best
-      : state.tool === "Kreis"
-        ? fitCircle3D(samples.points, samples.normals[0])
-        : state.tool === "Linie"
-          ? fitLine(samples.points)
-          : fitType(state.tool, samples.points, samples.normals);
+    const fit = fitSelection(samples.points, samples.normals);
     state.preview = geometryFromFit(fit, samples.points);
-    els.fitSummary.textContent = formatFit(fit);
+    els.fitSummary.textContent = `${formatFit(fit)} · ${fit.n} Punkte`;
     els.fitPreview.hidden = false;
     rebuildGeometries();
     toast("Vorschau. Uebernehmen oder nochmal klicken.");
@@ -1274,9 +1446,7 @@ function confirmPreview() {
   state.setup.geometries.push(state.preview);
   placement.anchor = { kind: "geometry", geometryId: state.preview.id, attach: "center" };
   state.selectedGeometryId = state.preview.id;
-  state.preview = null;
-  els.fitPreview.hidden = true;
-  rebuildGeometries();
+  clearBrush();
   syncEditor();
   toast(UI.geoMade);
 }
@@ -1321,6 +1491,170 @@ function geometryFromFit(fit, points = []) {
     summary: formatFit(fit),
     drawRadius,
   };
+}
+
+function probeApi() {
+  const api = {
+    get ready() {
+      return Boolean(state.meshIndex);
+    },
+    get preview() {
+      return state.preview && {
+        type: state.preview.fitType,
+        diameter: state.preview.diameter,
+        summary: state.preview.summary,
+      };
+    },
+    get brushSize() {
+      return state.brushSet.size;
+    },
+    summary() {
+      return els.fitSummary.textContent;
+    },
+    project(point) {
+      const vector = new THREE.Vector3(point[0], point[1], point[2]);
+      vector.project(camera);
+      const rect = els.view.getBoundingClientRect();
+      return {
+        x: (vector.x * 0.5 + 0.5) * rect.width + rect.left,
+        y: (-vector.y * 0.5 + 0.5) * rect.height + rect.top,
+        behind: vector.z < -1 || vector.z > 1,
+      };
+    },
+    hit(clientX, clientY) {
+      return pickSurface({ clientX, clientY });
+    },
+    bendAt(clientX, clientY) {
+      const start = api.hit(clientX, clientY);
+      if (!start) return 0;
+      const normal = new THREE.Vector3(start.normal.x, start.normal.y, start.normal.z).normalize();
+      let u = new THREE.Vector3(1, 0, 0).cross(normal);
+      if (u.lengthSq() < 1e-8) u = new THREE.Vector3(0, 1, 0).cross(normal);
+      u.normalize();
+      const v = new THREE.Vector3().crossVectors(normal, u).normalize();
+      const origin = new THREE.Vector3(start.point.x, start.point.y, start.point.z);
+      const score = (dir) => {
+        const guess = origin.clone().addScaledVector(dir, 10);
+        const screen = api.project([guess.x, guess.y, guess.z]);
+        if (screen.behind) return 0;
+        const hit = api.hit(screen.x, screen.y);
+        if (!hit) return 0;
+        return 1 - Math.abs(hit.normal.x * normal.x + hit.normal.y * normal.y + hit.normal.z * normal.z);
+      };
+      return Math.max(score(u), score(v));
+    },
+    brushPath(clientX, clientY) {
+      const start = api.hit(clientX, clientY);
+      if (!start) return [{ x: clientX, y: clientY }];
+      const normal = new THREE.Vector3(start.normal.x, start.normal.y, start.normal.z).normalize();
+      let u = new THREE.Vector3(1, 0, 0).cross(normal);
+      if (u.lengthSq() < 1e-8) u = new THREE.Vector3(0, 1, 0).cross(normal);
+      u.normalize();
+      const v = new THREE.Vector3().crossVectors(normal, u).normalize();
+      const origin = new THREE.Vector3(start.point.x, start.point.y, start.point.z);
+      const bendOf = (dir) => {
+        const hit = steppedHit(origin, dir, 8);
+        if (!hit) return 0;
+        return 1 - Math.abs(hit.normal.x * normal.x + hit.normal.y * normal.y + hit.normal.z * normal.z);
+      };
+      const around = bendOf(u) >= bendOf(v) ? u : v;
+      const along = around === u ? v : u;
+      const points = [{ x: clientX, y: clientY }];
+      const walk = (dir, distance) => {
+        let pos = origin.clone();
+        const steps = Math.ceil(distance / 3);
+        for (let i = 0; i < steps; i += 1) {
+          const hit = steppedHit(pos, dir, 3);
+          if (!hit) break;
+          const agree = hit.normal.x * normal.x + hit.normal.y * normal.y + hit.normal.z * normal.z;
+          if (agree < 0.55) break;
+          const place = new THREE.Vector3(hit.point.x, hit.point.y, hit.point.z);
+          pos.copy(place);
+          const screen = api.project([place.x, place.y, place.z]);
+          points.push({ x: screen.x, y: screen.y });
+        }
+      };
+      walk(around, 36);
+      walk(around.clone().negate(), 36);
+      walk(along, 12);
+      walk(along.clone().negate(), 12);
+      return points;
+
+      function steppedHit(pos, dir, distance) {
+        const guess = pos.clone().addScaledVector(dir, distance);
+        const screen = api.project([guess.x, guess.y, guess.z]);
+        if (screen.behind) return null;
+        const hit = api.hit(screen.x, screen.y);
+        if (!hit) return null;
+        const dx = hit.point.x - guess.x;
+        const dy = hit.point.y - guess.y;
+        const dz = hit.point.z - guess.z;
+        if (dx * dx + dy * dy + dz * dz > 36) return null;
+        return hit;
+      }
+    },
+    visiblePoint(faceIds, options = {}) {
+      const direction = camera.position.clone().sub(controls.target).normalize();
+      for (const id of faceIds) {
+        const face = state.meshIndex.faces[id];
+        const toward = face.n[0] * direction.x + face.n[1] * direction.y + face.n[2] * direction.z;
+        if (toward < 0.35) continue;
+        const point = [
+          (face.a[0] + face.b[0] + face.c[0]) / 3,
+          (face.a[1] + face.b[1] + face.c[1]) / 3,
+          (face.a[2] + face.b[2] + face.c[2]) / 3,
+        ];
+        const screen = api.project(point);
+        if (screen.behind) continue;
+        const top = document.elementFromPoint(screen.x, screen.y);
+        if (!top || top.id !== "view") continue;
+        const hit = api.hit(screen.x, screen.y);
+        if (!hit) continue;
+        const dx = hit.point.x - point[0];
+        const dy = hit.point.y - point[1];
+        const dz = hit.point.z - point[2];
+        if (dx * dx + dy * dy + dz * dz > 4) continue;
+        if (options.requireBend && api.bendAt(screen.x, screen.y) < 0.015) continue;
+        return {
+          x: screen.x,
+          y: screen.y,
+          point,
+          normal: [hit.normal.x, hit.normal.y, hit.normal.z],
+          faceIndex: hit.faceIndex,
+        };
+      }
+      return null;
+    },
+    findPaintTargets() {
+      const mesh = state.meshIndex;
+      const seen = new Uint8Array(mesh.faces.length);
+      const targets = {};
+      for (let face = 0; face < mesh.faces.length && (!targets.cylinder || !targets.plane); face += 1) {
+        if (seen[face]) continue;
+        const faces = growRegion(mesh, face, state.growAngle);
+        for (const id of faces) seen[id] = 1;
+        if (faces.length < 40) continue;
+        const samples = regionSamples(mesh, faces, "surface");
+        let fit;
+        try {
+          fit = autoFit(samples.points, samples.normals).best;
+        } catch {
+          continue;
+        }
+        const key = fit.type === "Zylinder" && Math.abs((fit.diameter || 0) - 80) < 0.05
+          ? "cylinder"
+          : fit.type === "Ebene" && faces.length > 80
+            ? "plane"
+            : null;
+        if (!key || targets[key]) continue;
+        const visible = api.visiblePoint(faces, { requireBend: key === "cylinder" });
+        if (!visible) continue;
+        targets[key] = { ...visible, type: fit.type, diameter: fit.diameter ?? null, faces: faces.length };
+      }
+      return targets;
+    },
+  };
+  return api;
 }
 
 function indexLoadedModel(group) {

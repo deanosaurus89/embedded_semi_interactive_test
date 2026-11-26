@@ -213,6 +213,11 @@ body.is-editing .flag {
   cursor: grab;
 }
 
+body.is-brush .flag,
+body.is-brush #leaders .handle {
+  pointer-events: none;
+}
+
 body.is-editing .flag:active { cursor: grabbing; }
 
 .flag.is-selected {
@@ -433,6 +438,7 @@ body.is-editing #leaders .handle { pointer-events: auto; cursor: grab; }
 
 .checks { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 8px; margin-bottom: 8px; }
 .checks label { flex-direction: row; align-items: center; gap: 6px; margin: 0; }
+#editor .checkline { flex-direction: row; align-items: center; gap: 6px; }
 .note { margin: 0 0 8px; color: var(--muted); line-height: 1.35; }
 .char-list { display: flex; flex-direction: column; gap: 4px; max-height: 140px; overflow: auto; }
 .char-list button {
