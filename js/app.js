@@ -112,7 +112,17 @@ const state = {
   warnedLive: false,
 };
 
-const PICK_MIN = { Linie: 2, Kreis: 3, Ebene: 4, Kugel: 4, Zylinder: 5, Kegel: 6, Langloch: 5 };
+const PICK_MIN = { Linie: 2, Kreis: 3, Ebene: 4, Kugel: 4, Zylinder: 4, Kegel: 4, Langloch: 4 };
+const PICK_EXTRA = new Set(["Ebene", "Kreis", "Kugel"]);
+const PICK_HINT = {
+  Linie: ["Anfang", "Ende"],
+  Kreis: ["auf dem Kreis", "auf dem Kreis", "auf dem Kreis"],
+  Ebene: ["auf der Ebene", "auf der Ebene", "auf der Ebene", "auf der Ebene"],
+  Zylinder: ["auf dem Kreis", "auf dem Kreis", "auf dem Kreis", "in der Tiefe"],
+  Kegel: ["auf dem Kreis", "auf dem Kreis", "auf dem Kreis", "in der Tiefe"],
+  Kugel: ["auf der Kugel", "auf der Kugel", "auf der Kugel", "auf der Kugel"],
+  Langloch: ["am runden Ende", "am runden Ende", "am runden Ende", "am anderen Ende"],
+};
 const numberTextures = new Map();
 const geometryGroups = new Map();
 let pickRoot;
@@ -1263,17 +1273,24 @@ function updatePickStatus() {
   }
   const have = state.picks.length;
   if (state.extraArmed) {
-    els.pickStatus.textContent = `Weiterer Punkt, bisher ${have}.`;
+    els.pickStatus.textContent = `${state.tool}: weiterer Punkt, bisher ${have}.`;
     return;
   }
-  els.pickStatus.textContent = have < need ? `Punkt ${have + 1} von ${need}` : `Punkt ${have} von ${need}`;
+  if (have < need) {
+    const hint = PICK_HINT[state.tool]?.[have];
+    els.pickStatus.textContent = hint
+      ? `${state.tool}: Punkt ${have + 1} von ${need} = ${hint}`
+      : `${state.tool}: Punkt ${have + 1} von ${need}`;
+    return;
+  }
+  els.pickStatus.textContent = `${state.tool}: Punkt ${have} von ${need}`;
 }
 
 function showPickControls() {
   const active = state.tool !== "point" && state.picks.length > 0;
   els.fitPreview.hidden = !active;
   els.fitOk.hidden = !state.preview;
-  els.fitMore.hidden = !state.preview;
+  els.fitMore.hidden = !(state.preview && PICK_EXTRA.has(state.tool));
   if (!state.preview) els.fitSummary.textContent = els.pickStatus.textContent;
 }
 
@@ -1475,7 +1492,9 @@ function geometryFromFit(fit, points = []) {
     normal: vec(fit.normal),
     direction: vec(fit.direction),
     apex: vec(fit.apex),
+    start: vec(fit.start),
     radius: fit.radius ?? null,
+    endRadius: fit.endRadius ?? null,
     diameter: fit.diameter ?? null,
     length: fit.length ?? null,
     width: fit.width ?? null,
@@ -1495,6 +1514,7 @@ function probeApi() {
       return state.preview && {
         type: state.preview.fitType,
         diameter: state.preview.diameter,
+        length: state.preview.length,
         form: state.preview.form,
         summary: state.preview.summary,
       };
@@ -1528,6 +1548,8 @@ function probeApi() {
       };
     },
     look(eye, target) {
+      const damping = controls.enableDamping;
+      controls.enableDamping = false;
       camera.position.set(eye[0], eye[1], eye[2]);
       controls.target.set(target[0], target[1], target[2]);
       camera.near = 0.5;
@@ -1535,6 +1557,7 @@ function probeApi() {
       camera.updateProjectionMatrix();
       camera.updateMatrixWorld(true);
       controls.update();
+      controls.enableDamping = damping;
     },
     gridPlane(count = 4) {
       const rect = els.view.getBoundingClientRect();
@@ -1679,14 +1702,31 @@ function rebuildGeometries() {
     const group = new THREE.Group();
     group.renderOrder = 2;
     const lift = geometry.normal ? scale(normalize(geometry.normal) || geometry.normal, 0.4) : { x: 0, y: 0, z: 0 };
-    const ringTypes = ["circle", "cylinder", "cone", "slot"];
-    if (ringTypes.includes(geometry.type) && geometry.center && geometry.radius) {
+    if (geometry.type === "circle" && geometry.center && geometry.radius) {
       group.add(circleMesh(add(geometry.center, lift), geometry.normal, geometry.radius, geometry));
-      if (geometry.length && geometry.type !== "circle") {
-        const half = scale(normalize(geometry.normal) || geometry.normal, geometry.length / 2);
-        group.add(circleMesh(add(add(geometry.center, lift), half), geometry.normal, geometry.radius, geometry));
-        group.add(circleMesh(add(add(geometry.center, lift), scale(half, -1)), geometry.normal, geometry.radius, geometry));
+    }
+    if ((geometry.type === "cylinder" || geometry.type === "cone") && geometry.center && geometry.radius && geometry.normal) {
+      const axis = normalize(geometry.normal);
+      const start = geometry.start
+        ? add(geometry.start, lift)
+        : add(add(geometry.center, lift), scale(axis, -((geometry.length || 0) / 2)));
+      const end = add(start, scale(axis, geometry.length || 0));
+      group.add(circleMesh(start, axis, geometry.radius, geometry));
+      if (geometry.length) {
+        group.add(circleMesh(end, axis, geometry.endRadius ?? geometry.radius, geometry));
+        group.add(segmentMesh(start, end, axis, geometry));
       }
+    }
+    if (geometry.type === "slot" && geometry.center && geometry.radius && geometry.normal && geometry.direction) {
+      const dir = normalize(geometry.direction);
+      const span = Math.max((geometry.length || 0) - 2 * geometry.radius, 0);
+      const c1 = add(add(geometry.center, lift), scale(dir, -span / 2));
+      const c2 = add(add(geometry.center, lift), scale(dir, span / 2));
+      group.add(circleMesh(c1, geometry.normal, geometry.radius, geometry));
+      group.add(circleMesh(c2, geometry.normal, geometry.radius, geometry));
+      const side = normalize(cross(geometry.normal, dir)) || { x: 1, y: 0, z: 0 };
+      group.add(segmentMesh(add(c1, scale(side, geometry.radius)), add(c2, scale(side, geometry.radius)), geometry.normal, geometry));
+      group.add(segmentMesh(add(c1, scale(side, -geometry.radius)), add(c2, scale(side, -geometry.radius)), geometry.normal, geometry));
     }
     if (geometry.type === "sphere" && geometry.center && geometry.radius) {
       const sphere = new THREE.Mesh(
@@ -1696,9 +1736,15 @@ function rebuildGeometries() {
       sphere.position.set(geometry.center.x, geometry.center.y, geometry.center.z);
       group.add(sphere);
     }
-    if ((geometry.type === "plane" || geometry.type === "line") && geometry.center && geometry.normal) {
-      const radius = Math.max(geometry.drawRadius || geometry.length || geometry.radius || 20, 4);
-      group.add(circleMesh(add(geometry.center, lift), geometry.normal, radius, { ...geometry, lineWidth: geometry.type === "line" ? 1 : geometry.lineWidth }));
+    if (geometry.type === "plane" && geometry.center && geometry.normal) {
+      const radius = Math.max(geometry.drawRadius || geometry.radius || 20, 4);
+      group.add(circleMesh(add(geometry.center, lift), geometry.normal, radius, geometry));
+    }
+    if (geometry.type === "line" && geometry.center && geometry.direction && geometry.length) {
+      const dir = normalize(geometry.direction);
+      const start = add(geometry.center, scale(dir, -geometry.length / 2));
+      const end = add(geometry.center, scale(dir, geometry.length / 2));
+      group.add(segmentMesh(add(start, lift), add(end, lift), geometry.normal, geometry));
     }
     if (geometry.type === "rect" && geometry.corners?.length === 4) {
       group.add(rectMesh(geometry.corners.map((point) => add(point, lift)), geometry));
@@ -1706,6 +1752,27 @@ function rebuildGeometries() {
     geometryRoot.add(group);
     geometryGroups.set(geometry.id, group);
   }
+}
+
+function segmentMesh(start, end, normal, geometry) {
+  const dir = normalize({ x: end.x - start.x, y: end.y - start.y, z: end.z - start.z });
+  const group = new THREE.Group();
+  if (!dir) return group;
+  const n = normalize(normal) || { x: 0, y: 1, z: 0 };
+  const side = normalize(cross(dir, n)) || { x: 1, y: 0, z: 0 };
+  const offset = scale(side, Math.max(0.45, geometry.lineWidth * 0.45));
+  const a = add(start, offset);
+  const b = add(start, scale(offset, -1));
+  const c = add(end, offset);
+  const d = add(end, scale(offset, -1));
+  group.add(meshFrom(
+    [a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z, d.x, d.y, d.z],
+    [0, 1, 2, 1, 3, 2],
+    geometry.color,
+    geometry.opacity,
+    true,
+  ));
+  return group;
 }
 
 function circleMesh(center, normal, radius, geometry) {

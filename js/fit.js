@@ -171,8 +171,22 @@ export function fitPlane(points, normalHint) {
   return { type: "Ebene", center, normal, residuals: residual, ...stats(residual) };
 }
 
+export function constructLine(points) {
+  if (points.length < 2) throw new Error("Linie braucht 2 Punkte: Anfang und Ende.");
+  const start = points[0];
+  const end = points[points.length - 1];
+  const delta = sub(end, start);
+  const length = norm(delta);
+  if (length < 1e-6) throw new Error("Linie: die beiden Punkte liegen aufeinander.");
+  const direction = canonical(unit(delta));
+  const center = add(start, scale(unit(delta), length / 2));
+  const residual = new Float64Array(points.length);
+  return { type: "Linie", center, normal: direction, direction, length, start, residuals: residual, ...stats(residual) };
+}
+
 export function fitLine(points, plane) {
   if (points.length < 2) throw new Error("Linie braucht mindestens 2 Punkte.");
+  if (!plane && points.length === 2) return constructLine(points);
   const projected = plane
     ? points.map((q) => sub(q, scale(plane.normal, dot(sub(q, plane.center), plane.normal))))
     : points;
@@ -288,6 +302,93 @@ function tiltAxis(d0, a, b) {
 export function canonical(d) {
   const i = [0, 1, 2].reduce((a, b) => (Math.abs(d[b]) > Math.abs(d[a]) + 1e-9 ? b : a), 2);
   return d[i] < 0 ? scale(d, -1) : d;
+}
+
+export function constructCylinder(points) {
+  if (points.length < 4) throw new Error("Zylinder braucht 4 Punkte: drei auf einem Kreis, einer in der Tiefe.");
+  const circle = fitCircle3D(points.slice(0, 3));
+  const origin = circle.center;
+  const far = points[points.length - 1];
+  const signed = dot(sub(far, origin), circle.normal);
+  if (Math.abs(signed) < 1e-4) throw new Error("Zylinder: Punkt 4 liegt in der Kreisebene.");
+  const dir = signed >= 0 ? circle.normal : scale(circle.normal, -1);
+  const length = Math.abs(signed);
+  const residual = new Float64Array(points.length);
+  points.forEach((q, i) => {
+    const w = sub(q, origin);
+    const t = dot(w, dir);
+    residual[i] = Math.hypot(w[0] - t * dir[0], w[1] - t * dir[1], w[2] - t * dir[2]) - circle.radius;
+  });
+  return {
+    type: "Zylinder",
+    center: add(origin, scale(dir, length / 2)),
+    start: origin,
+    normal: dir,
+    radius: circle.radius,
+    endRadius: circle.radius,
+    diameter: 2 * circle.radius,
+    length,
+    residuals: residual,
+    ...stats(residual),
+  };
+}
+
+export function constructCone(points) {
+  if (points.length < 4) throw new Error("Kegel braucht 4 Punkte: drei auf einem Kreis, einer in der Tiefe.");
+  const circle = fitCircle3D(points.slice(0, 3));
+  const origin = circle.center;
+  const r1 = circle.radius;
+  const far = points[points.length - 1];
+  const w = sub(far, origin);
+  const signed = dot(w, circle.normal);
+  if (Math.abs(signed) < 1e-4) throw new Error("Kegel: Punkt 4 liegt in der Kreisebene.");
+  const dir = signed >= 0 ? circle.normal : scale(circle.normal, -1);
+  const d = Math.abs(signed);
+  const radialVec = sub(w, scale(dir, dot(w, dir)));
+  const r2 = norm(radialVec);
+  const halfAngle = Math.atan(Math.abs(r2 - r1) / d);
+  const residual = new Float64Array(points.length);
+  return {
+    type: "Kegel",
+    center: add(origin, scale(dir, d / 2)),
+    start: origin,
+    normal: dir,
+    radius: r1,
+    endRadius: r2,
+    diameter: 2 * r1,
+    halfAngle,
+    length: d,
+    residuals: residual,
+    ...stats(residual),
+  };
+}
+
+export function constructSlot(points) {
+  if (points.length < 4) throw new Error("Langloch braucht 4 Punkte: drei am runden Ende, einer am anderen Ende.");
+  const circle = fitCircle3D(points.slice(0, 3));
+  const c1 = circle.center;
+  const radius = circle.radius;
+  const normal = circle.normal;
+  const far = points[3];
+  const projected = sub(far, scale(normal, dot(sub(far, c1), normal)));
+  const delta = sub(projected, c1);
+  const reach = norm(delta);
+  if (reach <= radius * 1.05) throw new Error("Langloch: Punkt 4 liegt zu nah am ersten Ende.");
+  const direction = unit(delta);
+  const length = reach + radius;
+  const residual = new Float64Array(points.length);
+  return {
+    type: "Langloch",
+    center: add(c1, scale(direction, (reach - radius) / 2)),
+    start: c1,
+    normal,
+    direction: canonical(direction),
+    radius,
+    width: 2 * radius,
+    length,
+    residuals: residual,
+    ...stats(residual),
+  };
 }
 
 export function fitCylinder(points, axisHint) {
@@ -454,11 +555,11 @@ export function fitType(type, points, normals, robustFit = true) {
     switch (type) {
       case "Ebene": return fitPlane(pp, nn.length ? centroid(nn) : undefined);
       case "Kugel": return fitSphere(pp);
-      case "Zylinder": return fitCylinder(pp, axisFromNormals(nn.length ? nn : pp.map(() => [0, 0, 1])).axis);
+      case "Zylinder": return pp.length <= 4 ? constructCylinder(pp) : fitCylinder(pp, axisFromNormals(nn.length ? nn : pp.map(() => [0, 0, 1])).axis);
       case "Kreis": return fitCircle3D(pp);
-      case "Langloch": return fitSlot(pp, nn.length ? unit(centroid(nn)) : fitPlane(pp).normal);
-      case "Kegel": return fitCone(pp, nn.length ? nn : pp.map(() => [0, 0, 1]));
-      case "Linie": return fitLine(pp);
+      case "Langloch": return pp.length <= 4 ? constructSlot(pp) : fitSlot(pp, nn.length ? unit(centroid(nn)) : fitPlane(pp).normal);
+      case "Kegel": return pp.length <= 4 ? constructCone(pp) : fitCone(pp, nn.length ? nn : pp.map(() => [0, 0, 1]));
+      case "Linie": return pp.length <= 2 ? constructLine(pp) : fitLine(pp);
       default: throw new Error("Typ nicht ausgleichbar: " + type);
     }
   };
@@ -508,7 +609,9 @@ export function autoFit(points, normals) {
 export function formatFit(fit) {
   const mm = (value) => new Intl.NumberFormat("de-DE", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value);
   const bits = [fit.type];
-  if (fit.diameter) bits.push(`Durchmesser ${mm(fit.diameter)} mm`);
+  if (fit.endRadius != null && fit.radius != null && Math.abs(fit.endRadius - fit.radius) > 1e-3) {
+    bits.push(`Durchmesser ${mm(2 * fit.radius)} / ${mm(2 * fit.endRadius)} mm`);
+  } else if (fit.diameter) bits.push(`Durchmesser ${mm(fit.diameter)} mm`);
   else if (fit.radius) bits.push(`Radius ${mm(fit.radius)} mm`);
   if (fit.length) bits.push(`Laenge ${mm(fit.length)} mm`);
   if (fit.width && fit.type === "Langloch") bits.push(`Breite ${mm(fit.width)} mm`);
