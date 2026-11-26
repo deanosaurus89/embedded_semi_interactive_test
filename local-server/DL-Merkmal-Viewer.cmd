@@ -1,6 +1,6 @@
-﻿@echo off
+@echo off
 set "DL_LAUNCH=%~f0"
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$t=Get-Content -LiteralPath $env:DL_LAUNCH -Raw; $m='#__POWERSHELL__'; $i=$t.LastIndexOf($m); if($i -lt 0){Write-Host 'Startmarker fehlt'; exit 1}; iex $t.Substring($i+$m.Length)"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$t=Get-Content -LiteralPath $env:DL_LAUNCH -Raw -Encoding UTF8; $m='#__POWERSHELL__'; $i=$t.LastIndexOf($m); if($i -lt 0){Write-Host 'Startmarker fehlt'; exit 1}; iex $t.Substring($i+$m.Length)"
 exit /b
 #__POWERSHELL__
 $ErrorActionPreference = 'Stop'
@@ -488,6 +488,15 @@ function Show-Main {
   [void]$f.ShowDialog()
 }
 function Invoke-SelfTest {
+  $launch = $env:DL_LAUNCH
+  if ($launch -and (Test-Path -LiteralPath $launch)) {
+    $bytes = [IO.File]::ReadAllBytes($launch)
+    if ($bytes.Length -ge 3 -and $bytes[0] -eq 239 -and $bytes[1] -eq 187 -and $bytes[2] -eq 191) { throw 'cmd darf kein UTF-8-BOM haben' }
+    foreach ($b in $bytes) { if ($b -gt 127) { throw 'cmd muss reines ASCII sein' } }
+    $asText = [Text.Encoding]::ASCII.GetString($bytes)
+    if ($asText -match '(?<!\r)\n') { throw 'cmd muss CRLF verwenden' }
+    if ($asText -notmatch 'Get-Content -LiteralPath \$env:DL_LAUNCH -Raw -Encoding UTF8') { throw 'Bootstrap liest nicht als UTF8' }
+  }
   $json = ConvertTo-JsonArray @([pscustomobject]@{ projectId = 'p1'; projectName = 'Eins'; workspaceId = 'w'; workspaceName = 'WS' })
   if ($json -notmatch '^\[') { throw 'Array erwartet' }
   $two = ConvertTo-JsonArray @(

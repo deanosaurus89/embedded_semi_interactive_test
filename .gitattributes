@@ -1,1 +1,2 @@
 models/*.obj binary
+*.cmd text eol=crlf
