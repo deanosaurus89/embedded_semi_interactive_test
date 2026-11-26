@@ -20,7 +20,7 @@ $Script:TemplateName = ''
 $Script:PieceCache = @{}
 $Script:Sync = [hashtable]::Synchronized(@{ LiveJson = ''; ModelPath = ''; Status = 'Bereit'; Stop = $false; WantTop = '50'; WantFrom = ''; WantTo = '' })
 $Script:StaticFiles = @(
-  'index.html','css/app.css','js/app.js','js/data-source.js','js/geometry.js','js/label-template.js','js/fit.js','js/mesh-select.js','js/tumble-controls.js','data/layout.json','data/example-measurements.json','models/milkyway.obj'
+  'index.html','css/app.css','js/app.js','js/data-source.js','js/geometry.js','js/label-template.js','js/fit.js','js/mesh-select.js','js/tumble-controls.js','js/tumble.js','js/mw-vec.js','js/pointertap.js','js/viewsnap.js','js/viewcube.js','js/polyline.js','data/layout.json','data/example-measurements.json','models/milkyway.obj'
 )
 
 function As-One($v) {

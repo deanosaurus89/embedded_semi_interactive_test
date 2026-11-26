@@ -1,5 +1,8 @@
 import * as THREE from "three";
 import { TumbleControls } from "./tumble-controls.js";
+import { pickGesture, tapSlop } from "./pointertap.js";
+import { ViewCube } from "./viewcube.js";
+import { keepLegacyFit, projectOutline } from "./polyline.js";
 import { OBJLoader } from "three/addons/loaders/OBJLoader.js";
 import { createDataSource } from "./data-source.js";
 import {
@@ -33,7 +36,7 @@ const UI = {
   dataError: "Die Daten konnten nicht geladen werden.",
   webglError: "WebGL ist in diesem Browser nicht verfügbar.",
   emptyModel: "Das Modell enthält keine Flächen.",
-  hint: "Fähnchen ziehen. Punkt oder Geometrie mit der gewählten Art setzen. Linksklick wählt, Rechts dreht, Mitte zoomt.",
+  hint: "Linke Maustaste dreht die Ansicht, ein kurzer Klick setzt einen Punkt. Mittlere und rechte Maustaste verschieben. Das Mausrad zoomt.",
   pickFirst: "Zuerst ein Fähnchen auswählen.",
   pickMiss: "Kein Treffer auf der Oberfläche.",
   anchorSet: "Fußpunkt gesetzt.",
@@ -60,6 +63,10 @@ const els = {
   filterQuick: document.querySelector(".filter-quick"),
   viewLock: document.getElementById("view-lock"),
   reconnect: document.getElementById("reconnect"),
+  planeTools: document.getElementById("plane-tools"),
+  planeKind: document.getElementById("plane-kind"),
+  planeHint: document.getElementById("plane-hint"),
+  planeClose: document.getElementById("plane-close"),
   prepare: document.getElementById("prepare"),
   finish: document.getElementById("finish"),
   discard: document.getElementById("discard"),
@@ -119,6 +126,9 @@ const state = {
   viewLocked: true,
   reconnect: false,
   layoutTemplateId: "",
+  planeKind: "quad",
+  polylineClosed: false,
+  nearFirst: false,
   model: null,
   warnedLive: false,
 };
@@ -137,6 +147,7 @@ const PICK_HINT = {
 const numberTextures = new Map();
 const geometryGroups = new Map();
 let pickRoot;
+let viewCube;
 const scratch = new THREE.Vector3();
 const pointerNdc = new THREE.Vector2();
 let renderer;
@@ -332,8 +343,29 @@ function bindUi() {
     state.tool = els.tool.value;
     state.draftPoints = [];
     resetPicks();
+    updatePlaneUi();
     updatePickStatus();
     updateHint();
+  });
+  els.planeKind.addEventListener("change", () => {
+    state.planeKind = els.planeKind.value === "polyline" ? "polyline" : "quad";
+    state.polylineClosed = false;
+    resetPicks();
+    updatePlaneUi();
+  });
+  els.planeClose.addEventListener("click", closePolyline);
+  window.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" || !state.edit || state.tool !== "Ebene" || state.planeKind !== "polyline") return;
+    if (state.picks.length < 3 || state.polylineClosed) return;
+    event.preventDefault();
+    closePolyline();
+  });
+  els.view.addEventListener("pointermove", (event) => {
+    state.nearFirst = nearFirstPoint(event);
+    if (state.tool === "Ebene" && state.planeKind === "polyline") updatePickMarkers();
+  });
+  els.view.addEventListener("dblclick", () => {
+    if (state.tool === "Ebene" && state.planeKind === "polyline" && state.picks.length >= 3 && !state.polylineClosed) closePolyline();
   });
   els.snap.addEventListener("change", () => {
     state.snap = els.snap.checked;
@@ -437,6 +469,7 @@ function applyFilter(patch, persist = true) {
 
 function syncViewLock() {
   if (controls) controls.enabled = !state.viewLocked;
+  if (viewCube) viewCube.setVisible(!state.viewLocked);
   if (!els.viewLock) return;
   els.viewLock.classList.toggle("is-locked", state.viewLocked);
   els.viewLock.setAttribute("aria-pressed", String(state.viewLocked));
@@ -459,7 +492,8 @@ function initViewer() {
   renderer.setClearColor(0x000000, 0);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   scene = new THREE.Scene();
-  camera = new THREE.PerspectiveCamera(32, 1, 0.1, 10000);
+  camera = new THREE.PerspectiveCamera(35, 1, 0.1, 10000);
+  camera.up.set(0, 0, 1);
   scene.add(camera);
   scene.add(new THREE.HemisphereLight(0xf7f8fb, 0x9aa3ad, 0.62));
   const key = new THREE.DirectionalLight(0xffffff, 1.25);
@@ -480,7 +514,7 @@ function initViewer() {
   controls.addEventListener("start", () => {
     state.userMovedCamera = true;
   });
-  controls.addEventListener("click", (event) => pickFromPointer(event));
+  viewCube = new ViewCube(els.stage, camera, controls, (snapped) => applySnap(snapped));
   syncViewLock();
   raycaster = new THREE.Raycaster();
 }
@@ -540,67 +574,22 @@ function measureFlagBand() {
   return maxHeight ? maxHeight + 12 : null;
 }
 
-function frameModel(object, preferredBand) {
-  const box = new THREE.Box3().setFromObject(object);
-  const center = box.getCenter(new THREE.Vector3());
-  const size = box.getSize(new THREE.Vector3());
-  const radius = 0.5 * Math.hypot(size.x, size.y, size.z);
-  camera.near = Math.max(0.1, radius / 300);
-  camera.far = radius * 40;
+function frameModel(object) {
+  const sphere = new THREE.Box3().setFromObject(object).getBoundingSphere(new THREE.Sphere());
+  const center = sphere.center.clone();
+  const radius = Math.max(sphere.radius, 1e-3);
+  const vfov = (camera.fov * Math.PI) / 180;
+  const hfov = 2 * Math.atan(Math.tan(vfov / 2) * Math.max(camera.aspect, 0.2));
+  const dist = (radius / Math.sin(Math.min(vfov, hfov) / 2)) * 0.9;
+  const dir = new THREE.Vector3(1, -1.3, 1.1).normalize();
+  camera.up.set(0, 0, 1);
   controls.target.copy(center);
-  const stageW = Math.max(1, els.stage.clientWidth);
-  const stageH = Math.max(1, els.stage.clientHeight);
-  const minModel = Math.min(120, stageH * 0.32);
-  let band = preferredBand ?? (stageH < 360 ? Math.max(64, stageH * 0.24) : Math.min(176, Math.max(96, stageH * 0.28)));
-  if (stageH - band * 2 < minModel) band = Math.max(36, (stageH - minModel) / 2);
-  const dir = new THREE.Vector3(0.5, 0.42, 1).normalize();
-  let lo = radius * 0.35;
-  let hi = radius * 10;
-  let best = hi;
-  for (let i = 0; i < 20; i += 1) {
-    const dist = (lo + hi) / 2;
-    camera.position.copy(center).addScaledVector(dir, dist);
-    camera.updateProjectionMatrix();
-    camera.updateMatrixWorld(true);
-    const span = projectBox(box, stageW, stageH);
-    const fits = span && span.minX >= stageW * 0.03 && span.maxX <= stageW * 0.97 && span.minY >= band && span.maxY <= Math.max(band + 40, stageH - band);
-    if (fits) {
-      best = dist;
-      hi = dist;
-    } else lo = dist;
-  }
-  camera.position.copy(center).addScaledVector(dir, best);
+  camera.position.copy(center).add(dir.multiplyScalar(dist));
+  camera.near = dist / 100;
+  camera.far = dist * 10;
   camera.updateProjectionMatrix();
-  camera.updateMatrixWorld(true);
-  controls.minDistance = radius * 0.12;
-  controls.maxDistance = radius * 8;
+  camera.lookAt(controls.target);
   controls.update();
-}
-
-function projectBox(box, stageW, stageH) {
-  const corners = [
-    [box.min.x, box.min.y, box.min.z],
-    [box.min.x, box.min.y, box.max.z],
-    [box.min.x, box.max.y, box.min.z],
-    [box.min.x, box.max.y, box.max.z],
-    [box.max.x, box.min.y, box.min.z],
-    [box.max.x, box.min.y, box.max.z],
-    [box.max.x, box.max.y, box.min.z],
-    [box.max.x, box.max.y, box.max.z],
-  ];
-  let minX = Infinity;
-  let minY = Infinity;
-  let maxX = -Infinity;
-  let maxY = -Infinity;
-  for (const corner of corners) {
-    const projected = projectToStage({ x: corner[0], y: corner[1], z: corner[2] }, stageW, stageH);
-    if (!projected) return null;
-    minX = Math.min(minX, projected.x);
-    minY = Math.min(minY, projected.y);
-    maxX = Math.max(maxX, projected.x);
-    maxY = Math.max(maxY, projected.y);
-  }
-  return { minX, minY, maxX, maxY };
 }
 
 function projectToStage(anchor, stageW = els.stage.clientWidth, stageH = els.stage.clientHeight) {
@@ -617,6 +606,18 @@ function projectToStage(anchor, stageW = els.stage.clientWidth, stageH = els.sta
   }
   scratch.applyMatrix4(camera.projectionMatrix);
   return { x: (scratch.x * 0.5 + 0.5) * stageW, y: (-scratch.y * 0.5 + 0.5) * stageH, behind: false };
+}
+
+function applySnap(snapped) {
+  if (state.viewLocked || !snapped) return;
+  const dist = Math.max(camera.position.distanceTo(controls.target), 1e-3);
+  camera.up.set(snapped.up[0], snapped.up[1], snapped.up[2]);
+  camera.position.copy(controls.target).add(new THREE.Vector3(snapped.dir[0], snapped.dir[1], snapped.dir[2]).multiplyScalar(dist));
+  camera.near = dist / 100;
+  camera.far = dist * 10;
+  camera.updateProjectionMatrix();
+  camera.lookAt(controls.target);
+  controls.update();
 }
 
 function reveal() {
@@ -643,6 +644,7 @@ function tick() {
   requestAnimationFrame(tick);
   controls.update();
   renderer.render(scene, camera);
+  if (viewCube && !state.viewLocked) viewCube.render(renderer);
   updateLeaders();
 }
 
@@ -688,7 +690,7 @@ function normalizeCamera(cameraValue) {
   if (!position || !target) return null;
   const fov = Number(cameraValue.fov);
   const up = asVec3(cameraValue.up);
-  return { position, target, up, fov: Number.isFinite(fov) ? fov : 32 };
+  return { position, target, up, fov: Number.isFinite(fov) ? fov : 35 };
 }
 
 function asVec3(value) {
@@ -755,8 +757,12 @@ function normalizeGeometry(raw) {
     center: asVec3(raw.center),
     radius: isFiniteNumber(raw.radius) ? raw.radius : null,
     corners: Array.isArray(raw.corners) ? raw.corners.map(asVec3).filter(Boolean) : null,
+    outline: Array.isArray(raw.outline) ? raw.outline.map(asVec3).filter(Boolean) : null,
+    planeKind: raw.planeKind === "polyline" ? "polyline" : "quad",
+    start: asVec3(raw.start),
+    endRadius: isFiniteNumber(raw.endRadius) ? raw.endRadius : null,
   };
-  if (geometry.mode === "fit" && geometry.center) return geometry;
+  if (keepLegacyFit(geometry)) return geometry;
   recomputeGeometry(geometry);
   if ((geometry.type === "circle" || geometry.mode === "fit") && !geometry.center) return null;
   if (geometry.type === "rect" && !geometry.corners) return null;
@@ -794,6 +800,7 @@ function serializeSetup(setup) {
       ? {
           position: roundVec(setup.camera.position),
           target: roundVec(setup.camera.target),
+          up: setup.camera.up ? roundVec(setup.camera.up) : { x: 0, y: 0, z: 1 },
           fov: setup.camera.fov,
         }
       : null,
@@ -829,6 +836,10 @@ function serializeGeometry(geometry) {
     direction: geometry.direction ? roundVec(geometry.direction) : null,
     apex: geometry.apex ? roundVec(geometry.apex) : null,
     corners: geometry.corners ? geometry.corners.map(roundVec) : null,
+    outline: geometry.outline ? geometry.outline.map(roundVec) : null,
+    planeKind: geometry.planeKind || "",
+    start: geometry.start ? roundVec(geometry.start) : null,
+    endRadius: geometry.endRadius == null ? null : round(geometry.endRadius, 4),
   };
 }
 
@@ -870,7 +881,10 @@ function applyCamera(saved) {
   controls.target.set(target.x, target.y, target.z);
   const up = asVec3(saved.up);
   if (up) camera.up.set(up.x, up.y, up.z);
-  camera.fov = saved.fov || 32;
+  camera.fov = saved.fov || 35;
+  const dist = camera.position.distanceTo(controls.target) || 1;
+  camera.near = dist / 100;
+  camera.far = dist * 10;
   camera.updateProjectionMatrix();
   controls.update();
   camera.updateMatrixWorld(true);
@@ -1207,6 +1221,16 @@ function anchorWorld(key) {
     if (geometry.center && geometry.normal && geometry.radius && attach === "nearest") {
       return nearestOnCircle(geometry, key) || geometry.center;
     }
+    if (geometry.type === "plane" && geometry.outline?.length) {
+      const loop = geometry.outline.length > 1
+        && geometry.outline[0].x === geometry.outline.at(-1).x
+        && geometry.outline[0].y === geometry.outline.at(-1).y
+        && geometry.outline[0].z === geometry.outline.at(-1).z
+        ? geometry.outline.slice(0, -1)
+        : geometry.outline;
+      const sum = loop.reduce((acc, point) => add(acc, point), { x: 0, y: 0, z: 0 });
+      return scale(sum, 1 / loop.length);
+    }
     if (geometry.center) return geometry.center;
     if (geometry.start) return geometry.start;
     if (geometry.corners?.length) {
@@ -1388,7 +1412,15 @@ function onHandlePointerDown(event) {
 
 function onViewPointerDown(event) {
   if (event.button !== 0) return;
-  pointerDown = { x: event.clientX, y: event.clientY };
+  pointerDown = {
+    x: event.clientX,
+    y: event.clientY,
+    t: performance.now(),
+    type: event.pointerType || "mouse",
+    position: camera.position.clone(),
+    up: camera.up.clone(),
+    target: controls.target.clone(),
+  };
 }
 
 function onViewPointerUp(event) {
@@ -1396,10 +1428,28 @@ function onViewPointerUp(event) {
     pointerDown = null;
     return;
   }
-  const dx = event.clientX - pointerDown.x;
-  const dy = event.clientY - pointerDown.y;
+  const moved = Math.hypot(event.clientX - pointerDown.x, event.clientY - pointerDown.y);
+  const dt = performance.now() - pointerDown.t;
+  const slop = tapSlop(pointerDown.type);
+  const saved = pointerDown;
   pointerDown = null;
-  if (!state.edit || !state.viewLocked || dx * dx + dy * dy > 16) return;
+  if (!state.edit) return;
+  const pick = pickGesture({
+    pointerType: saved.type,
+    moved,
+    dt,
+    multi: false,
+    dragged: moved > slop,
+    wide: true,
+  }) === "pick";
+  if (!pick) return;
+  if (!state.viewLocked) {
+    camera.position.copy(saved.position);
+    camera.up.copy(saved.up);
+    controls.target.copy(saved.target);
+    camera.lookAt(controls.target);
+    controls.update();
+  }
   pickFromPointer(event);
 }
 
@@ -1432,12 +1482,19 @@ function minimumFor(tool) {
 }
 
 function updatePickStatus() {
+  updatePlaneUi();
   const need = minimumFor(state.tool);
   if (!need) {
     els.pickStatus.textContent = "Ein Klick setzt den Fußpunkt.";
     return;
   }
   const have = state.picks.length;
+  if (state.tool === "Ebene" && state.planeKind === "polyline" && !state.polylineClosed) {
+    els.pickStatus.textContent = have < 3
+      ? `Ebene: Punkt ${have + 1} von 3`
+      : "Klick auf den ersten Punkt schliesst den Linienzug";
+    return;
+  }
   if (state.extraArmed) {
     els.pickStatus.textContent = `${state.tool}: weiterer Punkt, bisher ${have}.`;
     return;
@@ -1463,6 +1520,8 @@ function showPickControls() {
 function resetPicks() {
   state.picks = [];
   state.extraArmed = false;
+  state.polylineClosed = false;
+  state.nearFirst = false;
   state.preview = null;
   if (els.fitPreview) els.fitPreview.hidden = true;
   updatePickMarkers();
@@ -1484,14 +1543,15 @@ function undoPick() {
   }
 }
 
-function numberTexture(n) {
-  const cached = numberTextures.get(n);
+function numberTexture(n, color = "#1d4ed8") {
+  const key = `${n}:${color}`;
+  const cached = numberTextures.get(key);
   if (cached) return cached;
   const canvas = document.createElement("canvas");
   canvas.width = 128;
   canvas.height = 128;
   const ctx = canvas.getContext("2d");
-  ctx.fillStyle = "#1d4ed8";
+  ctx.fillStyle = color;
   ctx.beginPath();
   ctx.arc(64, 64, 58, 0, Math.PI * 2);
   ctx.fill();
@@ -1505,7 +1565,7 @@ function numberTexture(n) {
   ctx.fillText(String(n), 64, 68);
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
-  numberTextures.set(n, texture);
+  numberTextures.set(key, texture);
   return texture;
 }
 
@@ -1517,13 +1577,14 @@ function updatePickMarkers() {
     pickRoot.remove(child);
   }
   state.picks.forEach((pick, index) => {
+    const closeHint = index === 0 && state.nearFirst && state.tool === "Ebene" && state.planeKind === "polyline" && state.picks.length >= 3 && !state.polylineClosed;
     const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
-      map: numberTexture(index + 1),
+      map: numberTexture(index + 1, closeHint ? "#128a3e" : "#1d4ed8"),
       depthTest: false,
       depthWrite: false,
     }));
     sprite.position.set(pick.point[0], pick.point[1], pick.point[2]);
-    sprite.scale.set(14, 14, 1);
+    sprite.scale.set(closeHint ? 22 : 14, closeHint ? 22 : 14, 1);
     sprite.renderOrder = 20;
     pickRoot.add(sprite);
   });
@@ -1610,7 +1671,15 @@ function onSurfaceClick(hit) {
   }
   const need = minimumFor(state.tool);
   if (!need) return;
-  if (state.preview && !state.extraArmed) {
+  if (state.tool === "Ebene" && state.planeKind === "polyline" && !state.polylineClosed && state.picks.length >= 3 && (state.nearFirst || hit.faceIndex === state.picks[0].face)) {
+    const pickedFirst = capturePick(hit);
+    const same = pickedFirst.id != null && pickedFirst.id === state.picks[0].id;
+    if (state.nearFirst || same) {
+      closePolyline();
+      return;
+    }
+  }
+  if (state.preview && !state.extraArmed && !(state.tool === "Ebene" && state.planeKind === "polyline" && !state.polylineClosed)) {
     toast("Uebernehmen, weiteren Punkt oder Abbrechen.");
     return;
   }
@@ -1623,12 +1692,39 @@ function onSurfaceClick(hit) {
   state.extraArmed = false;
   updatePickMarkers();
   updatePickStatus();
-  if (state.picks.length >= need) runPickFit();
+  updatePlaneUi();
+  const polylineOpen = state.tool === "Ebene" && state.planeKind === "polyline" && !state.polylineClosed;
+  if (!polylineOpen && state.picks.length >= need) runPickFit();
   else {
     state.preview = null;
     rebuildGeometries();
     showPickControls();
   }
+}
+
+function updatePlaneUi() {
+  const plane = state.tool === "Ebene";
+  if (els.planeTools) els.planeTools.hidden = !plane;
+  const open = plane && state.planeKind === "polyline" && state.picks.length >= 3 && !state.polylineClosed;
+  if (els.planeHint) els.planeHint.hidden = !open;
+  if (els.planeClose) els.planeClose.hidden = !open;
+}
+
+function nearFirstPoint(event) {
+  if (state.tool !== "Ebene" || state.planeKind !== "polyline" || state.picks.length < 3 || !state.picks[0]) return false;
+  const projected = projectToStage({ x: state.picks[0].point[0], y: state.picks[0].point[1], z: state.picks[0].point[2] });
+  if (!projected || !event) return false;
+  const rect = els.view.getBoundingClientRect();
+  return Math.hypot(event.clientX - (rect.left + projected.x * (rect.width / Math.max(els.stage.clientWidth, 1))), event.clientY - (rect.top + projected.y * (rect.height / Math.max(els.stage.clientHeight, 1)))) < 14
+    || Math.hypot(event.clientX - rect.left - projected.x, event.clientY - rect.top - projected.y) < 14;
+}
+
+function closePolyline() {
+  if (state.picks.length < 3) return;
+  state.polylineClosed = true;
+  state.nearFirst = false;
+  updatePlaneUi();
+  runPickFit();
 }
 
 function confirmPreview() {
@@ -1683,6 +1779,8 @@ function geometryFromFit(fit, points = []) {
     summary: formatFit(fit),
     form: fit.form,
     drawRadius,
+    outline: fit.type === "Ebene" ? projectOutline(points, fit) : null,
+    planeKind: state.planeKind,
   };
 }
 
@@ -1731,6 +1829,48 @@ function probeApi() {
       rebuildGeometries();
       refreshFlagContents();
       updateLeaders();
+    },
+    cubeHidden() {
+      return Boolean(document.getElementById("navcube")?.hidden);
+    },
+    demoPlanes() {
+      const legacy = normalizeGeometry({
+        id: "old-plane",
+        type: "plane",
+        mode: "fit",
+        center: { x: 180, y: 40, z: 30 },
+        normal: { x: 0, y: 0, z: 1 },
+        radius: 28,
+        color: "#9aa3ad",
+      });
+      const points = [[250, 28, 78], [370, 22, 78], [418, 78, 78], [330, 138, 78], [248, 112, 78]];
+      const fit = fitType("Ebene", points, [], false);
+      const outline = projectOutline(points, fit);
+      const fresh = normalizeGeometry({
+        id: "poly-plane",
+        type: "plane",
+        mode: "fit",
+        planeKind: "polyline",
+        center: { x: fit.center[0], y: fit.center[1], z: fit.center[2] },
+        normal: { x: fit.normal[0], y: fit.normal[1], z: fit.normal[2] },
+        outline,
+        color: "#d0121a",
+        lineWidth: 3,
+        opacity: 0.95,
+      });
+      state.setup.geometries = state.setup.geometries.filter((item) => item.id !== "old-plane" && item.id !== "poly-plane");
+      if (legacy) state.setup.geometries.push(legacy);
+      if (fresh) state.setup.geometries.push(fresh);
+      rebuildGeometries();
+      updateLeaders();
+      const loop = fresh?.outline || [];
+      const a = loop[0];
+      const b = loop[loop.length - 1];
+      return {
+        legacyLoaded: Boolean(legacy && legacy.center && !legacy.outline?.length),
+        closed: Boolean(a && b && a.x === b.x && a.y === b.y && a.z === b.z && loop.length === points.length + 1),
+        kinds: this.shapes(),
+      };
     },
     clearAnchor(key) {
       if (state.setup.placements[key]) state.setup.placements[key].anchor = null;
@@ -1960,7 +2100,9 @@ function rebuildGeometries() {
       sphere.position.set(geometry.center.x, geometry.center.y, geometry.center.z);
       group.add(sphere);
     }
-    if (geometry.type === "plane" && geometry.center && geometry.normal) {
+    if (geometry.type === "plane" && geometry.outline?.length >= 4) {
+      group.add(loopMesh(geometry.outline, geometry));
+    } else if (geometry.type === "plane" && geometry.center && geometry.normal) {
       const radius = Math.max(geometry.drawRadius || geometry.radius || 20, 4);
       group.add(circleMesh(add(geometry.center, lift), geometry.normal, radius, geometry));
     }
@@ -1976,6 +2118,41 @@ function rebuildGeometries() {
     geometryRoot.add(group);
     geometryGroups.set(geometry.id, group);
   }
+}
+
+function loopMesh(loop, geometry) {
+  const group = new THREE.Group();
+  if (loop.length < 4) return group;
+  const positions = [];
+  const indices = [];
+  const thickness = Math.max(0.45, geometry.lineWidth * 0.55);
+  const normal = geometry.normal || { x: 0, y: 0, z: 1 };
+  for (let i = 0; i < loop.length - 1; i += 1) {
+    const current = loop[i];
+    const next = loop[i + 1];
+    const edge = normalize({ x: next.x - current.x, y: next.y - current.y, z: next.z - current.z });
+    if (!edge) continue;
+    const outward = normalize(cross(normal, edge)) || { x: 1, y: 0, z: 0 };
+    const quad = [
+      add(current, scale(outward, -thickness / 2)),
+      add(current, scale(outward, thickness / 2)),
+      add(next, scale(outward, -thickness / 2)),
+      add(next, scale(outward, thickness / 2)),
+    ];
+    const base = positions.length / 3;
+    for (const point of quad) positions.push(point.x, point.y, point.z);
+    indices.push(base, base + 1, base + 2, base + 1, base + 3, base + 2);
+  }
+  group.add(meshFrom(positions, indices, geometry.color, geometry.opacity, true));
+  const fill = [loop[0].x, loop[0].y, loop[0].z];
+  const fillIndex = [];
+  for (let i = 1; i < loop.length - 1; i += 1) {
+    fill.push(loop[i].x, loop[i].y, loop[i].z);
+    fillIndex.push(0, i, i + 1);
+  }
+  if (fillIndex.length) group.add(meshFrom(fill, fillIndex, geometry.color, geometry.opacity * 0.22, false));
+  group.userData.kind = "polyline";
+  return group;
 }
 
 function stadiumMesh(center, direction, normal, radius, length, geometry) {

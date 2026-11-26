@@ -67,7 +67,18 @@
           </label>
           <label class="checkline"><input id="snap" type="checkbox" checked /> Knoten fangen</label>
           <p id="pick-status" class="note">Ein Klick setzt den Fußpunkt.</p>
-          <p class="note">Kurzer Linksklick setzt einen Punkt. Links ziehen dreht, Mitte und Rechts schieben, Rad zoomt.</p>
+          <div id="plane-tools" hidden>
+            <label>
+              Ebene
+              <select id="plane-kind">
+                <option value="quad">4 Punkte</option>
+                <option value="polyline">Linienzug</option>
+              </select>
+            </label>
+            <p id="plane-hint" class="note" hidden>Klick auf den ersten Punkt schliesst den Linienzug</p>
+            <button type="button" id="plane-close" hidden>Schliessen</button>
+          </div>
+          <p class="note">Linke Maustaste dreht die Ansicht, ein kurzer Klick setzt einen Punkt. Mittlere und rechte Maustaste verschieben. Das Mausrad zoomt.</p>
           <button type="button" id="reconnect" hidden>Linie neu verbinden</button>
           <div id="fit-preview" hidden>
             <p id="fit-summary" class="note"></p>
