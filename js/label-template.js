@@ -190,7 +190,7 @@ function lineChart(characteristic, samples, template, stats, fmt) {
     values
       .map((value, index) => {
         const out = template.highlightOot && isOut(value, characteristic);
-        return `<circle class="pt${out ? " oot" : ""}" cx="${xAt(index).toFixed(2)}" cy="${yAt(value).toFixed(2)}" r="${out ? radius + 1 : radius}"><title>${escapeHtml(sampleTitle(samples[index], fmt, characteristic.unit))}</title></circle>`;
+        return `<circle class="pt${out ? " oot" : ""}" data-i="${index}" cx="${xAt(index).toFixed(2)}" cy="${yAt(value).toFixed(2)}" r="${out ? radius + 1 : radius}"></circle>`;
       })
       .join(""),
   );
@@ -232,7 +232,7 @@ function barChart(characteristic, samples, template, stats, fmt) {
         const h = Math.max(0.8, Math.abs(zero - y));
         const out = template.highlightOot && isOut(value, characteristic);
         const x = padL + index * slot + (slot - barW) / 2;
-        return `<rect class="bar${out ? " oot" : ""}" x="${x.toFixed(2)}" y="${top.toFixed(2)}" width="${barW.toFixed(2)}" height="${h.toFixed(2)}"><title>${escapeHtml(sampleTitle(samples[index], fmt, characteristic.unit))}</title></rect>`;
+        return `<rect class="bar${out ? " oot" : ""}" data-i="${index}" x="${x.toFixed(2)}" y="${top.toFixed(2)}" width="${barW.toFixed(2)}" height="${h.toFixed(2)}"></rect>`;
       })
       .join(""),
   );

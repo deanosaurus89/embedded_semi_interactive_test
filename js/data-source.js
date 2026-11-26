@@ -60,7 +60,31 @@ function normalizeSample(sample, pieceNames) {
     pieceName: sample.pieceName ? String(sample.pieceName) : known?.name || pieceId,
     value: Number(sample.value),
     timestamp: sample.timestamp ? String(sample.timestamp) : known?.timestamp,
+    creationDateUser: sample.creationDateUser
+      ? String(sample.creationDateUser)
+      : (sample.timestamp ? String(sample.timestamp) : known?.timestamp || ""),
     test: sample.test ? String(sample.test) : "",
+    userProperties: exampleProperties(sample, pieceId),
+  };
+}
+
+function exampleProperties(sample, pieceId) {
+  if (sample.userProperties && typeof sample.userProperties === "object") {
+    const props = {};
+    for (const [key, value] of Object.entries(sample.userProperties)) {
+      if (value != null && value !== "") props[key] = String(value);
+    }
+    if (Object.keys(props).length) return props;
+  }
+  const tail = pieceId.replace(/\D/g, "") || "1000";
+  const machines = ["CMM-1", "CMM-2", "CMM-3"];
+  const shifts = ["Frueh", "Spaet", "Nacht"];
+  const n = Number(tail) || 1000;
+  return {
+    Auftrag: `AUF-${tail}`,
+    Maschine: machines[n % machines.length],
+    Pruefer: "M. Beispiel",
+    Schicht: shifts[n % shifts.length],
   };
 }
 
@@ -102,7 +126,7 @@ export function createDataSource({ exampleUrl, liveUrl, intervalSeconds, onData,
     if (stopped) return;
     if (localhost()) {
       try {
-        const live = await readJson(liveUrl);
+        const live = await readJson(typeof liveUrl === "function" ? liveUrl() : liveUrl);
         const switched = mode !== "live";
         mode = "live";
         onData(live, { mode, initial, switched });
@@ -151,6 +175,9 @@ export function createDataSource({ exampleUrl, liveUrl, intervalSeconds, onData,
     },
     mode() {
       return mode;
+    },
+    refresh() {
+      return tick(false);
     },
   };
 }

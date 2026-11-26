@@ -100,6 +100,22 @@ button, select { font: inherit; }
   font-size: 12px;
   color: #d5deea;
 }
+.filter input, .filter-quick button {
+  font: inherit;
+  font-size: 12px;
+  color: #f4f7fb;
+  background: #2c3648;
+  border: 1px solid #4a576c;
+  border-radius: 4px;
+  padding: 3px 6px;
+}
+.filter input[type="number"] { width: 68px; }
+.filter-quick { display: inline-flex; gap: 4px; }
+.filter-quick button { cursor: pointer; }
+.filter-quick button.is-on, #view-lock.is-locked {
+  border-color: var(--amber);
+  color: var(--amber);
+}
 
 .toolbar button,
 .toolbar select {
@@ -214,6 +230,32 @@ body.is-editing .flag {
 }
 
 body.is-editing .flag:active { cursor: grabbing; }
+body.is-editing .flag.is-unassigned {
+  border-style: dashed;
+  border-color: #8b95a3;
+}
+body.is-editing .flag.is-unassigned::after {
+  content: "nicht zugeordnet";
+  display: block;
+  margin-top: 4px;
+  color: #6b7280;
+  font-size: 11px;
+}
+.flag .spark, .flag .spark .pt, .flag .spark .bar { pointer-events: auto; cursor: crosshair; }
+#chart-tip {
+  position: fixed;
+  z-index: 20;
+  max-width: 280px;
+  padding: 8px 10px;
+  background: #1b2330;
+  color: #f7f8fb;
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1.4;
+  pointer-events: none;
+  box-shadow: 0 8px 20px rgba(20, 28, 40, 0.28);
+}
+#chart-tip[hidden] { display: none; }
 
 .flag.is-selected {
   outline: 2px solid #2f6fed;

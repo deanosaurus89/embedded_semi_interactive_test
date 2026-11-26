@@ -27,13 +27,17 @@
         <div class="tools">
           <label class="filter">
             Teile
-            <select id="filter" aria-label="Anzahl der angezeigten Teile">
-              <option value="10">Letzte 10</option>
-              <option value="25" selected>Letzte 25</option>
-              <option value="50">Letzte 50</option>
-              <option value="all">Alle</option>
-            </select>
+            <input id="filter-count" type="number" min="1" max="5000" value="25" aria-label="Anzahl der angezeigten Teile" />
           </label>
+          <div class="filter-quick" role="group" aria-label="Schnellauswahl">
+            <button type="button" data-count="10">10</button>
+            <button type="button" data-count="25">25</button>
+            <button type="button" data-count="50">50</button>
+            <button type="button" data-count="all">Alle</button>
+          </div>
+          <label class="filter">Von <input id="filter-from" type="date" aria-label="Von Datum" /></label>
+          <label class="filter">Bis <input id="filter-to" type="date" aria-label="Bis Datum" /></label>
+          <button type="button" id="view-lock" class="is-locked" aria-pressed="true">Ansicht entsperren</button>
           <button type="button" id="prepare">Vorbereiten</button>
           <button type="button" id="finish" hidden>Abschließen</button>
           <button type="button" id="discard" hidden>Verwerfen</button>
@@ -62,7 +66,8 @@
           </label>
           <label class="checkline"><input id="snap" type="checkbox" checked /> Knoten fangen</label>
           <p id="pick-status" class="note">Ein Klick setzt den Fußpunkt.</p>
-          <p class="note">Linksklick setzt einen Punkt. Rechts drehen, Mitte zoomen.</p>
+          <p class="note">Kurzer Linksklick setzt einen Punkt. Links ziehen dreht, Mitte und Rechts schieben, Rad zoomt.</p>
+          <button type="button" id="reconnect" hidden>Linie neu verbinden</button>
           <div id="fit-preview" hidden>
             <p id="fit-summary" class="note"></p>
             <div class="geo-grid">
