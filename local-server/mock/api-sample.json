@@ -1,0 +1,87 @@
+{
+  "project": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+  "pieces": {
+    "value": [
+      {
+        "id": "11111111-1111-1111-1111-111111111111",
+        "name": "piece_002",
+        "creationDateUser": "2026-11-20T08:00:00Z"
+      },
+      {
+        "id": "22222222-2222-2222-2222-222222222222",
+        "name": "piece_001",
+        "creationDateUser": "2026-11-19T08:00:00Z"
+      }
+    ]
+  },
+  "controls": {
+    "11111111-1111-1111-1111-111111111111": {
+      "value": [
+        {
+          "name": "Mating Length 1",
+          "displayName": "Huelllaenge",
+          "objectName": "Langloch 1",
+          "type": "Mating Length",
+          "measured": 180.3,
+          "nominal": 180.0,
+          "tolerance": { "low": 0.0, "up": 0.45 },
+          "deviation": { "flag": "", "value": 0.3 },
+          "test": "Pass",
+          "units": { "precision": 2, "length": "Millimeters" },
+          "measurementDateTime": "2026-11-20T08:05:00Z"
+        },
+        {
+          "name": "Position 1",
+          "displayName": "Position",
+          "objectName": "Kreis 1",
+          "type": "Position",
+          "measured": 0.21,
+          "nominal": null,
+          "tolerance": { "low": 0.0, "up": 0.2 },
+          "deviation": { "flag": "", "value": 0.21 },
+          "test": "Fail",
+          "units": { "precision": 2, "length": "Millimeters" },
+          "measurementDateTime": "2026-11-20T08:05:00Z"
+        },
+        {
+          "name": "Length",
+          "displayName": "Length",
+          "objectName": "Wandstaerke",
+          "type": "Length",
+          "measured": null,
+          "nominal": 40.0,
+          "tolerance": { "low": -1.0, "up": 1.0 },
+          "deviation": null,
+          "test": null,
+          "units": { "precision": 2, "length": "Millimeters" },
+          "measurementDateTime": null
+        }
+      ]
+    },
+    "22222222-2222-2222-2222-222222222222": {
+      "value": [
+        {
+          "name": "Mating Length 1",
+          "displayName": "Huelllaenge",
+          "objectName": "Langloch 1",
+          "type": "Mating Length",
+          "measured": 180.1,
+          "nominal": 180.0,
+          "tolerance": { "low": 0.0, "up": 0.45 },
+          "deviation": { "flag": "", "value": 0.1 },
+          "test": "Pass",
+          "units": { "precision": 2, "length": "Millimeters" },
+          "measurementDateTime": "2026-11-19T08:05:00Z"
+        }
+      ]
+    }
+  },
+  "objects": {
+    "11111111-1111-1111-1111-111111111111": {
+      "value": [
+        { "id": "aaaaaaaa-0000-0000-0000-000000000001", "name": "Langloch 1", "type": "Slot" },
+        { "id": "aaaaaaaa-0000-0000-0000-000000000002", "name": "Kreis 1", "type": "Circle" }
+      ]
+    }
+  }
+}
