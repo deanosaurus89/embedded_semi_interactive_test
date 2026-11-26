@@ -162,7 +162,7 @@ function stats(residual) {
 }
 
 export function fitPlane(points, normalHint) {
-  if (points.length < 3) throw new Error("Ebene: mindestens 3 Punkte");
+  if (points.length < 3) throw new Error("Ebene braucht mindestens 3 Punkte, bitte mehr Fläche anmalen.");
   const center = centroid(points);
   let normal = eigSym3(scatter(points, center)).vectors[0];
   if (normalHint && dot(normal, normalHint) < 0) normal = scale(normal, -1);
@@ -172,7 +172,7 @@ export function fitPlane(points, normalHint) {
 }
 
 export function fitLine(points, plane) {
-  if (points.length < 2) throw new Error("Linie: mindestens 2 Punkte");
+  if (points.length < 2) throw new Error("Linie braucht mindestens 2 Punkte, bitte mehr Fläche anmalen.");
   const projected = plane
     ? points.map((q) => sub(q, scale(plane.normal, dot(sub(q, plane.center), plane.normal))))
     : points;
@@ -215,7 +215,7 @@ export function fitCircle2D(xy) {
 }
 
 export function fitCircle3D(points, normal) {
-  if (points.length < 3) throw new Error("Kreis: mindestens 3 Punkte");
+  if (points.length < 3) throw new Error("Kreis braucht mindestens 3 Punkte, bitte mehr Fläche anmalen.");
   const n = normal ? unit(normal) : fitPlane(points).normal;
   const c = centroid(points);
   const [u, v] = basis(n);
@@ -228,7 +228,7 @@ export function fitCircle3D(points, normal) {
 }
 
 export function fitSphere(points) {
-  if (points.length < 4) throw new Error("Kugel: mindestens 4 Punkte");
+  if (points.length < 4) throw new Error("Kugel braucht mindestens 4 Punkte, bitte mehr Fläche anmalen.");
   const A = [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
   const b = [0, 0, 0, 0];
   for (const q of points) {
@@ -271,7 +271,7 @@ export function canonical(d) {
 }
 
 export function fitCylinder(points, axisHint) {
-  if (points.length < 5) throw new Error("Zylinder: mindestens 5 Punkte");
+  if (points.length < 5) throw new Error("Zylinder braucht mindestens 5 Punkte, bitte mehr Fläche anmalen.");
   const d0 = unit(axisHint);
   const c0 = centroid(points);
   const [u, v] = basis(d0);
@@ -303,7 +303,7 @@ export function fitCylinder(points, axisHint) {
 }
 
 export function fitCone(points, normals) {
-  if (points.length < 6) throw new Error("Kegel: mindestens 6 Punkte");
+  if (points.length < 6) throw new Error("Kegel braucht mindestens 6 Punkte, bitte mehr Fläche anmalen.");
   let d0 = axisFromNormals(normals, true).axis;
   const M = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
   const b = [0, 0, 0];
@@ -364,7 +364,7 @@ function stadium(x, y, cx, cy, th, h, r) {
 }
 
 export function fitSlot(points, axis) {
-  if (points.length < 8) throw new Error("Langloch: mindestens 8 Punkte");
+  if (points.length < 8) throw new Error("Langloch braucht mindestens 8 Punkte, bitte mehr Fläche anmalen.");
   const n = canonical(unit(axis));
   const c0 = centroid(points);
   const [u, v] = basis(n);

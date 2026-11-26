@@ -62,9 +62,30 @@
             </select>
           </label>
           <label>
-            Auswahl-Toleranz <span id="grow-label">18 Grad</span>
-            <input id="grow-angle" type="range" min="5" max="40" step="1" value="18" />
+            Methode
+            <select id="method">
+              <option value="patch">Fläche</option>
+              <option value="brush">Pinsel</option>
+            </select>
           </label>
+          <div id="patch-tools">
+            <label>
+              Auswahl-Toleranz <span id="grow-label">18 Grad</span>
+              <input id="grow-angle" type="range" min="5" max="40" step="1" value="18" />
+            </label>
+          </div>
+          <div id="brush-tools" hidden>
+            <label>
+              Pinselradius <span id="brush-label">3 mm</span>
+              <input id="brush-radius" type="range" min="0.5" max="30" step="0.5" value="3" />
+            </label>
+            <label class="checkline"><input id="brush-erase" type="checkbox" /> Radieren (oder Umschalt)</label>
+            <div class="geo-grid">
+              <button type="button" id="brush-undo">Rückgängig</button>
+              <button type="button" id="brush-clear">Auswahl leeren</button>
+            </div>
+            <p class="note">Linke Maustaste malt. Rechte Maustaste dreht, mittlere zoomt.</p>
+          </div>
           <div id="fit-preview" hidden>
             <p id="fit-summary" class="note"></p>
             <button type="button" id="fit-ok">Uebernehmen</button>
