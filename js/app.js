@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { TumbleControls } from "./tumble-controls.js";
 import { OBJLoader } from "three/addons/loaders/OBJLoader.js";
 import { createDataSource } from "./data-source.js";
 import {
@@ -53,7 +53,12 @@ const els = {
   partName: document.getElementById("part-name"),
   dataBadge: document.getElementById("data-badge"),
   setupBadge: document.getElementById("setup-badge"),
-  filter: document.getElementById("filter"),
+  filterCount: document.getElementById("filter-count"),
+  filterFrom: document.getElementById("filter-from"),
+  filterTo: document.getElementById("filter-to"),
+  filterQuick: document.querySelector(".filter-quick"),
+  viewLock: document.getElementById("view-lock"),
+  reconnect: document.getElementById("reconnect"),
   prepare: document.getElementById("prepare"),
   finish: document.getElementById("finish"),
   discard: document.getElementById("discard"),
@@ -107,7 +112,11 @@ const state = {
   extraArmed: false,
   preview: null,
   draftPoints: [],
-  filter: "25",
+  filterCount: 25,
+  filterFrom: "",
+  filterTo: "",
+  viewLocked: true,
+  reconnect: false,
   model: null,
   warnedLive: false,
 };
@@ -142,6 +151,9 @@ let discardTimer = 0;
 let resetTimer = 0;
 let cameraIsSaved = false;
 let source;
+const chartTip = document.createElement("div");
+chartTip.id = "chart-tip";
+chartTip.hidden = true;
 
 const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
@@ -185,7 +197,13 @@ async function main() {
 
   source = createDataSource({
     exampleUrl: exampleUrl.href,
-    liveUrl: liveUrl.href,
+    liveUrl: () => {
+      const url = new URL(liveUrl.href);
+      url.searchParams.set("top", state.filterCount === "all" ? "5000" : String(state.filterCount || 25));
+      if (state.filterFrom) url.searchParams.set("from", state.filterFrom);
+      if (state.filterTo) url.searchParams.set("to", state.filterTo);
+      return url.href;
+    },
     intervalSeconds: () => {
       const fromQuery = Number(params.get("refresh"));
       if (Number.isFinite(fromQuery) && fromQuery >= 5) return fromQuery;
@@ -243,14 +261,25 @@ function acceptData(data, info) {
 }
 
 function bindUi() {
-  els.filter.addEventListener("change", () => {
-    state.filter = els.filter.value;
-    try {
-      localStorage.setItem(FILTER_KEY, state.filter);
-    } catch {
-      /* ignore */
+  els.filterCount.addEventListener("change", () => applyFilter({ count: els.filterCount.value }));
+  els.filterFrom.addEventListener("change", () => applyFilter({ from: els.filterFrom.value }));
+  els.filterTo.addEventListener("change", () => applyFilter({ to: els.filterTo.value }));
+  els.filterQuick.addEventListener("click", (event) => {
+    const count = event.target.closest("[data-count]")?.dataset.count;
+    if (!count) return;
+    applyFilter({ count });
+  });
+  els.viewLock.addEventListener("click", () => {
+    state.viewLocked = !state.viewLocked;
+    syncViewLock();
+  });
+  els.reconnect.addEventListener("click", () => {
+    if (!state.selectedId) {
+      toast(UI.pickFirst);
+      return;
     }
-    refreshFlagContents();
+    state.reconnect = true;
+    toast("Klicken Sie den neuen Fusspunkt oder eine Geometrie.");
   });
   els.prepare.addEventListener("click", () => beginEdit());
   els.finish.addEventListener("click", () => finishEdit());
@@ -297,7 +326,9 @@ function bindUi() {
   });
   els.fitUndo.addEventListener("click", undoPick);
   els.fitCancel.addEventListener("click", resetPicks);
-  els.view.addEventListener("pointerdown", onPickPointerDown, true);
+  els.flags.addEventListener("pointermove", onChartHover);
+  els.flags.addEventListener("pointerleave", hideChartTip);
+  document.body.append(chartTip);
   els.templateForm.addEventListener("change", readTemplateForm);
   els.templateForm.addEventListener("input", readTemplateForm);
   els.refreshSeconds.addEventListener("change", () => {
@@ -321,13 +352,55 @@ function bindUi() {
 function restoreFilter() {
   try {
     const stored = localStorage.getItem(FILTER_KEY);
+    if (!stored) return;
     if (stored === "10" || stored === "25" || stored === "50" || stored === "all") {
-      state.filter = stored;
-      els.filter.value = stored;
+      applyFilter({ count: stored }, false);
+      return;
     }
+    const parsed = JSON.parse(stored);
+    applyFilter({
+      count: parsed.count ?? 25,
+      from: parsed.from || "",
+      to: parsed.to || "",
+    }, false);
   } catch {
     /* ignore */
   }
+}
+
+function applyFilter(patch, persist = true) {
+  if (patch.count != null) {
+    state.filterCount = patch.count === "all" ? "all" : Math.max(1, Math.min(5000, Number(patch.count) || 25));
+  }
+  if (patch.from != null) state.filterFrom = patch.from;
+  if (patch.to != null) state.filterTo = patch.to;
+  if (els.filterCount) els.filterCount.value = state.filterCount === "all" ? "" : String(state.filterCount);
+  if (els.filterFrom) els.filterFrom.value = state.filterFrom;
+  if (els.filterTo) els.filterTo.value = state.filterTo;
+  for (const button of els.filterQuick?.querySelectorAll("[data-count]") || []) {
+    button.classList.toggle("is-on", button.dataset.count === String(state.filterCount));
+  }
+  if (persist) {
+    try {
+      localStorage.setItem(FILTER_KEY, JSON.stringify({
+        count: state.filterCount,
+        from: state.filterFrom,
+        to: state.filterTo,
+      }));
+    } catch {
+      /* ignore */
+    }
+  }
+  refreshFlagContents();
+  source?.refresh?.();
+}
+
+function syncViewLock() {
+  if (controls) controls.enabled = !state.viewLocked;
+  if (!els.viewLock) return;
+  els.viewLock.classList.toggle("is-locked", state.viewLocked);
+  els.viewLock.setAttribute("aria-pressed", String(state.viewLocked));
+  els.viewLock.textContent = state.viewLocked ? "Ansicht entsperren" : "Ansicht sperren";
 }
 
 function initViewer() {
@@ -363,19 +436,12 @@ function initViewer() {
   pickRoot = new THREE.Group();
   pickRoot.renderOrder = 20;
   scene.add(pickRoot);
-  controls = new OrbitControls(camera, els.view);
-  controls.mouseButtons.LEFT = THREE.MOUSE.ROTATE;
-  controls.mouseButtons.MIDDLE = THREE.MOUSE.DOLLY;
-  controls.mouseButtons.RIGHT = THREE.MOUSE.ROTATE;
-  controls.enableDamping = !reduceMotion;
-  controls.dampingFactor = 0.08;
-  controls.rotateSpeed = 0.85;
-  controls.zoomSpeed = 0.9;
-  controls.panSpeed = 0.75;
-  controls.screenSpacePanning = true;
+  controls = new TumbleControls(camera, els.view);
   controls.addEventListener("start", () => {
     state.userMovedCamera = true;
   });
+  controls.addEventListener("click", (event) => pickFromPointer(event));
+  syncViewLock();
   raycaster = new THREE.Raycaster();
 }
 
@@ -498,12 +564,19 @@ function projectBox(box, stageW, stageH) {
 }
 
 function projectToStage(anchor, stageW = els.stage.clientWidth, stageH = els.stage.clientHeight) {
-  if (!anchor) return null;
+  if (!anchor || !camera) return null;
   scratch.set(anchor.x, anchor.y, anchor.z);
   scratch.applyMatrix4(camera.matrixWorldInverse);
-  if (scratch.z >= 0) return null;
+  const behind = scratch.z >= -1e-4;
+  const vx = scratch.x;
+  const vy = scratch.y;
+  if (behind) {
+    const len = Math.hypot(vx, vy) || 1;
+    const reach = Math.max(stageW, stageH);
+    return { x: stageW / 2 + (vx / len) * reach, y: stageH / 2 - (vy / len) * reach, behind: true };
+  }
   scratch.applyMatrix4(camera.projectionMatrix);
-  return { x: (scratch.x * 0.5 + 0.5) * stageW, y: (-scratch.y * 0.5 + 0.5) * stageH };
+  return { x: (scratch.x * 0.5 + 0.5) * stageW, y: (-scratch.y * 0.5 + 0.5) * stageH, behind: false };
 }
 
 function reveal() {
@@ -574,7 +647,8 @@ function normalizeCamera(cameraValue) {
   const target = asVec3(cameraValue.target);
   if (!position || !target) return null;
   const fov = Number(cameraValue.fov);
-  return { position, target, fov: Number.isFinite(fov) ? fov : 32 };
+  const up = asVec3(cameraValue.up);
+  return { position, target, up, fov: Number.isFinite(fov) ? fov : 32 };
 }
 
 function asVec3(value) {
@@ -738,6 +812,7 @@ function captureCamera() {
   return {
     position: { x: camera.position.x, y: camera.position.y, z: camera.position.z },
     target: { x: controls.target.x, y: controls.target.y, z: controls.target.z },
+    up: { x: camera.up.x, y: camera.up.y, z: camera.up.z },
     fov: camera.fov,
   };
 }
@@ -748,6 +823,8 @@ function applyCamera(saved) {
   if (!position || !target) return;
   camera.position.set(position.x, position.y, position.z);
   controls.target.set(target.x, target.y, target.z);
+  const up = asVec3(saved.up);
+  if (up) camera.up.set(up.x, up.y, up.z);
   camera.fov = saved.fov || 32;
   camera.updateProjectionMatrix();
   controls.update();
@@ -758,6 +835,8 @@ function beginEdit() {
   state.edit = true;
   state.setup = clone(state.saved);
   document.body.classList.add("is-editing");
+  state.viewLocked = false;
+  syncViewLock();
   els.editor.hidden = false;
   updatePickStatus();
   syncChrome();
@@ -765,6 +844,7 @@ function beginEdit() {
   resizeRenderer();
   updateHint();
   updateLeaders();
+  markSelection();
 }
 
 function finishEdit() {
@@ -782,6 +862,9 @@ function finishEdit() {
   state.draftPoints = [];
   document.body.classList.remove("is-editing");
   els.editor.hidden = true;
+  state.viewLocked = true;
+  state.reconnect = false;
+  syncViewLock();
   resetPicks();
   syncChrome();
   updateHint();
@@ -811,6 +894,9 @@ function discardEdit() {
   if (state.setup.camera) applyCamera(state.setup.camera);
   document.body.classList.remove("is-editing");
   els.editor.hidden = true;
+  state.viewLocked = true;
+  state.reconnect = false;
+  syncViewLock();
   resetPicks();
   rebuildGeometries();
   renderFlags();
@@ -850,6 +936,9 @@ function onResetClick() {
   cameraIsSaved = Boolean(state.setup.camera);
   document.body.classList.remove("is-editing");
   els.editor.hidden = true;
+  state.viewLocked = true;
+  state.reconnect = false;
+  syncViewLock();
   resetPicks();
   if (state.setup.camera) applyCamera(state.setup.camera);
   else if (state.model) frameModel(state.model, measureFlagBand());
@@ -934,10 +1023,19 @@ function characteristicFor(key) {
 
 function windowOf(measurements) {
   if (!measurements) return [];
-  if (state.filter === "all") return measurements;
-  const count = Number(state.filter);
-  if (!Number.isFinite(count) || count <= 0) return measurements;
-  return measurements.slice(-count);
+  const from = state.filterFrom || "";
+  const to = state.filterTo || "";
+  const filtered = measurements.filter((sample) => {
+    const day = String(sample.timestamp || sample.creationDateUser || "").slice(0, 10);
+    if (!day) return !from && !to;
+    if (from && day < from) return false;
+    if (to && day > to) return false;
+    return true;
+  });
+  if (state.filterCount === "all") return filtered;
+  const count = Number(state.filterCount);
+  if (!Number.isFinite(count) || count <= 0) return filtered;
+  return filtered.slice(-count);
 }
 
 function renderFlags() {
@@ -949,6 +1047,7 @@ function renderFlags() {
 }
 
 function refreshFlagContents() {
+  if (!state.setup) return;
   for (const key of Object.keys(state.setup.placements)) {
     let article = els.flags.querySelector(`[data-id="${CSS.escape(key)}"]`);
     if (!article) {
@@ -978,6 +1077,7 @@ function fillFlag(article, key) {
     article.classList.remove("is-oot");
     article.dataset.n = "0";
     article.innerHTML = `<h2 class="flag-name">${escapeHtml(key)}</h2><p class="flag-meta">Keine Istwerte. Im Vorbereiten einem Merkmal zuordnen.</p>`;
+    markAnchor(article, key);
     return;
   }
   const built = renderFlag(characteristic, windowOf(characteristic.measurements), template);
@@ -985,6 +1085,11 @@ function fillFlag(article, key) {
   article.dataset.n = String(built.count);
   article.dataset.oot = String(built.outCount);
   article.innerHTML = built.html;
+  markAnchor(article, key);
+}
+
+function markAnchor(article, key) {
+  article.classList.toggle("is-unassigned", Boolean(state.edit) && !anchorWorld(key));
 }
 
 function autoPlace() {
@@ -1054,12 +1159,16 @@ function anchorWorld(key) {
     const geometry = state.setup.geometries.find((item) => item.id === anchor.geometryId);
     if (!geometry) return null;
     const attach = anchor.attach || geometry.attach || "center";
-    if (geometry.type === "circle" && attach === "nearest") return nearestOnCircle(geometry, key) || geometry.center;
-    if (geometry.type === "circle") return geometry.center;
+    if (geometry.center && geometry.normal && geometry.radius && attach === "nearest") {
+      return nearestOnCircle(geometry, key) || geometry.center;
+    }
+    if (geometry.center) return geometry.center;
+    if (geometry.start) return geometry.start;
     if (geometry.corners?.length) {
       const sum = geometry.corners.reduce((acc, point) => add(acc, point), { x: 0, y: 0, z: 0 });
       return scale(sum, 1 / geometry.corners.length);
     }
+    return null;
   }
   return anchor.point || null;
 }
@@ -1123,7 +1232,7 @@ function updateLeaders() {
   }
   if (!state.edit) return;
   for (const geometry of state.setup.geometries) {
-    geometry.points.forEach((point, index) => {
+    (geometry.points || []).forEach((point, index) => {
       const projected = projectToStage(point, stageRect.width, stageRect.height);
       if (!projected) return;
       els.leaders.append(makeHandle(projected.x, projected.y, { kind: "geopoint", id: geometry.id, index: String(index) }, geometry.color));
@@ -1223,20 +1332,13 @@ function onHandlePointerDown(event) {
     updateLeaders();
   };
   const up = () => {
-    controls.enabled = true;
+    controls.enabled = !state.viewLocked;
     handleDrag = null;
     window.removeEventListener("pointermove", move);
     window.removeEventListener("pointerup", up);
   };
   window.addEventListener("pointermove", move);
   window.addEventListener("pointerup", up);
-}
-
-function onPickPointerDown(event) {
-  if (event.button !== 0 || !state.edit || event.altKey) return;
-  event.stopImmediatePropagation();
-  event.preventDefault();
-  pointerDown = { x: event.clientX, y: event.clientY };
 }
 
 function onViewPointerDown(event) {
@@ -1252,13 +1354,32 @@ function onViewPointerUp(event) {
   const dx = event.clientX - pointerDown.x;
   const dy = event.clientY - pointerDown.y;
   pointerDown = null;
-  if (!state.edit || dx * dx + dy * dy > 36) return;
+  if (!state.edit || !state.viewLocked || dx * dx + dy * dy > 16) return;
+  pickFromPointer(event);
+}
+
+function pickFromPointer(event) {
+  if (!state.edit) return;
   const hit = pickSurface(event);
-  if (!hit) {
+  const geometryId = geometryAt(event);
+  if (!hit && !geometryId) {
     toast(UI.pickMiss);
     return;
   }
-  onSurfaceClick(hit);
+  onSurfaceClick(Object.assign(hit || { point: { x: 0, y: 0, z: 0 }, normal: { x: 0, y: 1, z: 0 }, faceIndex: 0 }, { geometryId }));
+}
+
+function geometryAt(event) {
+  if (!geometryRoot) return null;
+  const rect = els.view.getBoundingClientRect();
+  if (!rect.width || !rect.height) return null;
+  pointerNdc.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+  pointerNdc.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(pointerNdc, camera);
+  const hits = raycaster.intersectObject(geometryRoot, true);
+  let obj = hits[0]?.object;
+  while (obj && !obj.userData.geometryId) obj = obj.parent;
+  return obj?.userData.geometryId || null;
 }
 
 function minimumFor(tool) {
@@ -1407,6 +1528,21 @@ function runPickFit() {
 }
 
 function onSurfaceClick(hit) {
+  if (state.reconnect && state.selectedId) {
+    const placement = state.setup.placements[state.selectedId] || (state.setup.placements[state.selectedId] = {});
+    const geometryId = hit.geometryId;
+    if (geometryId) {
+      placement.anchor = { kind: "geometry", geometryId, attach: "center" };
+    } else {
+      const picked = capturePick(hit);
+      placement.anchor = { kind: "point", point: { x: picked.point[0], y: picked.point[1], z: picked.point[2] } };
+    }
+    state.reconnect = false;
+    refreshFlagContents();
+    updateLeaders();
+    toast(UI.anchorSet);
+    return;
+  }
   if (state.tool === "point") {
     if (!state.selectedId) {
       toast(UI.pickFirst);
@@ -1508,7 +1644,53 @@ function geometryFromFit(fit, points = []) {
 function probeApi() {
   return {
     get ready() {
-      return Boolean(state.meshIndex);
+      return Boolean(state.meshIndex && state.data);
+    },
+    leaders() {
+      return els.leaders.querySelectorAll("line").length;
+    },
+    placementCount() {
+      return Object.keys(state.setup?.placements || {}).length;
+    },
+    locked() {
+      return state.viewLocked;
+    },
+    camera() {
+      return [camera.position.x, camera.position.y, camera.position.z];
+    },
+    shapes() {
+      const kinds = [];
+      geometryRoot?.traverse((obj) => {
+        if (obj.userData?.kind) kinds.push(obj.userData.kind);
+      });
+      return kinds;
+    },
+    addSlot() {
+      state.setup.geometries.push({
+        id: "slot-demo",
+        type: "slot",
+        mode: "fit",
+        color: "#d0121a",
+        lineWidth: 2.5,
+        opacity: 0.9,
+        attach: "center",
+        center: { x: 315, y: 90, z: 40 },
+        normal: { x: 0, y: 1, z: 0 },
+        direction: { x: 1, y: 0, z: 0 },
+        radius: 18,
+        length: 70,
+        width: 36,
+      });
+      const key = "rundheit-lager";
+      state.setup.placements[key].anchor = { kind: "geometry", geometryId: "slot-demo", attach: "center" };
+      rebuildGeometries();
+      refreshFlagContents();
+      updateLeaders();
+    },
+    clearAnchor(key) {
+      if (state.setup.placements[key]) state.setup.placements[key].anchor = null;
+      refreshFlagContents();
+      updateLeaders();
     },
     get preview() {
       return state.preview && {
@@ -1701,6 +1883,11 @@ function rebuildGeometries() {
   for (const geometry of drawn) {
     const group = new THREE.Group();
     group.renderOrder = 2;
+    group.userData.geometryId = geometry.id;
+    group.userData.kind = geometry.type === "slot" ? "stadium" : geometry.type;
+    group.traverse((obj) => {
+      obj.userData.geometryId = geometry.id;
+    });
     const lift = geometry.normal ? scale(normalize(geometry.normal) || geometry.normal, 0.4) : { x: 0, y: 0, z: 0 };
     if (geometry.type === "circle" && geometry.center && geometry.radius) {
       group.add(circleMesh(add(geometry.center, lift), geometry.normal, geometry.radius, geometry));
@@ -1718,15 +1905,7 @@ function rebuildGeometries() {
       }
     }
     if (geometry.type === "slot" && geometry.center && geometry.radius && geometry.normal && geometry.direction) {
-      const dir = normalize(geometry.direction);
-      const span = Math.max((geometry.length || 0) - 2 * geometry.radius, 0);
-      const c1 = add(add(geometry.center, lift), scale(dir, -span / 2));
-      const c2 = add(add(geometry.center, lift), scale(dir, span / 2));
-      group.add(circleMesh(c1, geometry.normal, geometry.radius, geometry));
-      group.add(circleMesh(c2, geometry.normal, geometry.radius, geometry));
-      const side = normalize(cross(geometry.normal, dir)) || { x: 1, y: 0, z: 0 };
-      group.add(segmentMesh(add(c1, scale(side, geometry.radius)), add(c2, scale(side, geometry.radius)), geometry.normal, geometry));
-      group.add(segmentMesh(add(c1, scale(side, -geometry.radius)), add(c2, scale(side, -geometry.radius)), geometry.normal, geometry));
+      group.add(stadiumMesh(add(geometry.center, lift), geometry.direction, geometry.normal, geometry.radius, geometry.length || geometry.radius * 2, geometry));
     }
     if (geometry.type === "sphere" && geometry.center && geometry.radius) {
       const sphere = new THREE.Mesh(
@@ -1752,6 +1931,55 @@ function rebuildGeometries() {
     geometryRoot.add(group);
     geometryGroups.set(geometry.id, group);
   }
+}
+
+function stadiumMesh(center, direction, normal, radius, length, geometry) {
+  const dir = normalize(direction);
+  const n = normalize(normal);
+  const side = dir && n ? normalize(cross(n, dir)) : null;
+  const group = new THREE.Group();
+  if (!dir || !side) return group;
+  const span = Math.max(length - 2 * radius, 0);
+  const c1 = add(center, scale(dir, -span / 2));
+  const c2 = add(center, scale(dir, span / 2));
+  const steps = 18;
+  const loop = [];
+  for (let i = 0; i <= steps; i += 1) {
+    const angle = Math.PI / 2 + (Math.PI * i) / steps;
+    loop.push(add(c1, add(scale(dir, Math.cos(angle) * radius), scale(side, Math.sin(angle) * radius))));
+  }
+  for (let i = 0; i <= steps; i += 1) {
+    const angle = -Math.PI / 2 + (Math.PI * i) / steps;
+    loop.push(add(c2, add(scale(dir, Math.cos(angle) * radius), scale(side, Math.sin(angle) * radius))));
+  }
+  const positions = [];
+  const indices = [];
+  const thickness = Math.max(0.45, geometry.lineWidth * 0.55);
+  for (let i = 0; i < loop.length; i += 1) {
+    const current = loop[i];
+    const next = loop[(i + 1) % loop.length];
+    const edge = normalize({ x: next.x - current.x, y: next.y - current.y, z: next.z - current.z });
+    if (!edge) continue;
+    const outward = normalize(cross(n, edge)) || side;
+    const innerA = add(current, scale(outward, -thickness / 2));
+    const outerA = add(current, scale(outward, thickness / 2));
+    const innerB = add(next, scale(outward, -thickness / 2));
+    const outerB = add(next, scale(outward, thickness / 2));
+    const base = positions.length / 3;
+    for (const point of [innerA, outerA, innerB, outerB]) positions.push(point.x, point.y, point.z);
+    indices.push(base, base + 1, base + 2, base + 1, base + 3, base + 2);
+  }
+  group.add(meshFrom(positions, indices, geometry.color, geometry.opacity, true));
+  const fill = [center.x, center.y, center.z];
+  const fillIndex = [];
+  loop.forEach((point, index) => {
+    fill.push(point.x, point.y, point.z);
+    if (index < loop.length - 1) fillIndex.push(0, index + 1, index + 2);
+  });
+  fillIndex.push(0, loop.length, 1);
+  group.add(meshFrom(fill, fillIndex, geometry.color, geometry.opacity * 0.22, false));
+  group.userData.kind = "stadium";
+  return group;
 }
 
 function segmentMesh(start, end, normal, geometry) {
@@ -1984,12 +2212,68 @@ function readTemplateForm() {
 
 function markSelection() {
   for (const article of els.flags.querySelectorAll(".flag")) {
-    article.classList.toggle("is-selected", state.edit && article.dataset.id === state.selectedId);
+    const selected = state.edit && article.dataset.id === state.selectedId;
+    article.classList.toggle("is-selected", selected);
+    article.classList.toggle("is-unassigned", Boolean(state.edit) && !anchorWorld(article.dataset.id));
   }
+  if (els.reconnect) els.reconnect.hidden = !(state.edit && state.selectedId);
 }
 
 function updateHint() {
   els.hint.hidden = true;
+}
+
+function onChartHover(event) {
+  const mark = event.target.closest?.(".pt, .bar");
+  const article = event.target.closest?.(".flag");
+  if (!mark || !article) {
+    hideChartTip();
+    return;
+  }
+  const characteristic = characteristicFor(article.dataset.id);
+  const samples = characteristic ? windowOf(characteristic.measurements) : [];
+  const sample = samples[Number(mark.dataset.i)];
+  if (!characteristic || !sample) {
+    hideChartTip();
+    return;
+  }
+  chartTip.innerHTML = tooltipHtml(characteristic, sample);
+  chartTip.hidden = false;
+  const x = Math.min(event.clientX + 14, window.innerWidth - 300);
+  const y = Math.min(event.clientY + 16, window.innerHeight - 180);
+  chartTip.style.left = `${x}px`;
+  chartTip.style.top = `${y}px`;
+}
+
+function hideChartTip() {
+  chartTip.hidden = true;
+}
+
+function tooltipHtml(characteristic, sample) {
+  const fmt = new Intl.NumberFormat("de-DE", { minimumFractionDigits: 3, maximumFractionDigits: 3 });
+  const when = formatStamp(sample.timestamp);
+  const created = formatStamp(sample.creationDateUser);
+  const deviation = sample.value - characteristic.nominal;
+  const outside = sample.value > characteristic.usl || sample.value < characteristic.lsl;
+  const props = Object.entries(sample.userProperties || {})
+    .map(([key, value]) => `<div>${escapeHtml(key)}: ${escapeHtml(value)}</div>`)
+    .join("");
+  return [
+    `<div><strong>${escapeHtml(sample.pieceName || sample.pieceId || "Teil")}</strong></div>`,
+    `<div>Istwert: ${fmt.format(sample.value)} ${escapeHtml(characteristic.unit)}</div>`,
+    `<div>Abweichung: ${deviation >= 0 ? "+" : ""}${fmt.format(deviation)} ${escapeHtml(characteristic.unit)}</div>`,
+    `<div>${outside ? "ausser Toleranz" : "in Toleranz"}</div>`,
+    when ? `<div>Messzeit: ${escapeHtml(when)}</div>` : "",
+    created ? `<div>Erstellt: ${escapeHtml(created)}</div>` : "",
+    props,
+  ].join("");
+}
+
+function formatStamp(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return new Intl.DateTimeFormat("de-DE", { dateStyle: "medium", timeStyle: "short" }).format(date);
 }
 
 function toast(message) {

@@ -16,7 +16,7 @@ $Script:Token = ''
 $Script:PollSeconds = 60
 $Script:LastPieces = 50
 $Script:PieceCache = @{}
-$Script:Sync = [hashtable]::Synchronized(@{ LiveJson = ''; ModelPath = ''; Status = 'Bereit'; Stop = $false })
+$Script:Sync = [hashtable]::Synchronized(@{ LiveJson = ''; ModelPath = ''; Status = 'Bereit'; Stop = $false; WantTop = '50'; WantFrom = ''; WantTo = '' })
 $Script:StaticFiles = @(
   'index.html','css/app.css','js/app.js','js/data-source.js','js/geometry.js','js/label-template.js','js/fit.js','js/mesh-select.js','data/layout.json','data/example-measurements.json','models/milkyway.obj'
 )
@@ -238,11 +238,18 @@ function Unit-Of($c) {
 }
 function Update-LiveData([string]$ProjectId) {
   if (-not $ProjectId) { return }
+  $top = $Script:LastPieces
+  if ($Script:Sync.WantTop) { $parsedTop = 0; if ([int]::TryParse([string]$Script:Sync.WantTop, [ref]$parsedTop) -and $parsedTop -gt 0) { $top = $parsedTop } }
+  $from = [string]$Script:Sync.WantFrom
+  $to = [string]$Script:Sync.WantTo
+  $filter = "inspectorProject/id eq $ProjectId"
+  if ($from -match '^\d{4}-\d{2}-\d{2}$') { $filter = $filter + " and creationDateUser ge ${from}T00:00:00Z" }
+  if ($to -match '^\d{4}-\d{2}-\d{2}$') { $filter = $filter + " and creationDateUser le ${to}T23:59:59Z" }
   $pieces = @(Get-DlAll '/InspectorPieces' @{
-    '$filter' = "inspectorProject/id eq $ProjectId"
+    '$filter' = $filter
     '$orderby' = 'creationDateUser desc'
-    '$top' = [string]$Script:LastPieces
-    '$select' = 'id,name,creationDateUser'
+    '$top' = [string]$top
+    '$select' = 'id,name,creationDateUser,userProperties'
   })
   if ($pieces.Count -gt 0) { Update-LiveModel (As-Str $pieces[0].id) }
   $ordered = @()
@@ -272,7 +279,11 @@ function Update-LiveData([string]$ProjectId) {
       if ($null -eq $c.measured) { continue }
       $stamp = As-Str $c.measurementDateTime
       if (-not $stamp) { $stamp = As-Str $piece.creationDateUser }
-      $meas = @{ pieceId = $pid; pieceName = As-Str $piece.name; value = [double]$c.measured; timestamp = $stamp }
+      $props = @{}
+      if ($piece.userProperties) {
+        foreach ($prop in $piece.userProperties.PSObject.Properties) { $props[$prop.Name] = As-Str $prop.Value }
+      }
+      $meas = @{ pieceId = $pid; pieceName = As-Str $piece.name; value = [double]$c.measured; timestamp = $stamp; creationDateUser = (As-Str $piece.creationDateUser); userProperties = $props }
       if ($c.test) { $meas.test = As-Str $c.test }
       $byId[$id].measurements = @($byId[$id].measurements) + @($meas)
     }
@@ -341,6 +352,18 @@ function Start-HttpServer {
         $www = [string]$Sync.Www
         if ($path -eq '/' -or $path -eq '') { $path = '/index.html' }
         if ($path -eq '/data/live-measurements.json') {
+          $query = [string]$ctx.Request.Url.Query
+          if ($query.StartsWith('?')) { $query = $query.Substring(1) }
+          foreach ($part in $query.Split('&')) {
+            if (-not $part) { continue }
+            $bits = $part.Split('=')
+            $qk = [Uri]::UnescapeDataString($bits[0])
+            $qv = ''
+            if ($bits.Length -gt 1) { $qv = [Uri]::UnescapeDataString($bits[1]) }
+            if ($qk -eq 'top') { $Sync.WantTop = $qv }
+            elseif ($qk -eq 'from') { $Sync.WantFrom = $qv }
+            elseif ($qk -eq 'to') { $Sync.WantTo = $qv }
+          }
           $text = [string]$Sync.LiveJson
           if (-not $text) { $text = '{"error":"noch keine Live-Daten"}'; $ctx.Response.StatusCode = 404 } else { $ctx.Response.StatusCode = 200 }
           $bytes = [Text.Encoding]::UTF8.GetBytes($text)
