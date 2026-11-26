@@ -42,7 +42,7 @@ The page fills whatever size the iframe gets. It does not try to leave the frame
 
 ## Local DataLoop helper
 
-[`local-server/README.md`](local-server/README.md) (German) describes `Start-Merkmal-Viewer.cmd`. It serves this page on `http://localhost:8765/` and fills the live JSON from the DataLoop API. No server URL or token is stored in the repo. The DataLoop embed on that PC is:
+[`local-server/README.md`](local-server/README.md) (German) describes the one file Martin double-clicks: `local-server/DL-Merkmal-Viewer.cmd`. It serves this page on `http://localhost:8765/` and fills the live JSON and the reference model from the DataLoop API. No server URL or token is stored in the repo. The DataLoop embed on that PC is:
 
 ```html
 <iframe src="http://localhost:8765/" title="Milkyway Merkmale"></iframe>

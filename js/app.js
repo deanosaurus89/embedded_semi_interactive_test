@@ -14,6 +14,8 @@ import {
   GEOMETRY_PALETTE,
 } from "./geometry.js";
 import { DEFAULT_TEMPLATE, normalizeTemplate, renderFlag } from "./label-template.js";
+import { autoFit, fitCircle3D, fitLine, fitType, formatFit } from "./fit.js";
+import { buildMesh, growRegion, regionSamples } from "./mesh-select.js";
 
 // Anchors and geometries are stored in the original OBJ coordinate system.
 // The mesh is not moved, so a raycast hit can be saved as-is.
@@ -77,6 +79,12 @@ const els = {
   geoOpacity: document.getElementById("geo-opacity"),
   geoAttach: document.getElementById("geo-attach"),
   geoDelete: document.getElementById("geo-delete"),
+  growAngle: document.getElementById("grow-angle"),
+  growLabel: document.getElementById("grow-label"),
+  fitPreview: document.getElementById("fit-preview"),
+  fitSummary: document.getElementById("fit-summary"),
+  fitOk: document.getElementById("fit-ok"),
+  fitCancel: document.getElementById("fit-cancel"),
   templateForm: document.getElementById("template-form"),
   refreshSeconds: document.getElementById("refresh-seconds"),
 };
@@ -92,6 +100,8 @@ const state = {
   selectedId: null,
   selectedGeometryId: null,
   tool: "point",
+  growAngle: 18,
+  preview: null,
   draftPoints: [],
   filter: "25",
   model: null,
@@ -132,13 +142,13 @@ async function main() {
   const layoutUrl = new URL("../data/layout.json", import.meta.url);
   const exampleUrl = new URL("../data/example-measurements.json", import.meta.url);
   const liveUrl = new URL("../data/live-measurements.json", import.meta.url);
-  const modelUrl = new URL("../models/milkyway.obj", import.meta.url);
+  const modelUrl = await chooseModelUrl();
 
   const [layout, model] = await Promise.all([
     fetch(layoutUrl)
       .then((response) => (response.ok ? response.json() : { placements: {} }))
       .catch(() => ({ placements: {} })),
-    loadModel(modelUrl.href),
+    loadModel(modelUrl),
   ]);
 
   state.published = normalizeSetup(layout);
@@ -147,6 +157,7 @@ async function main() {
   state.saved = clone(draft || state.published);
   state.setup = clone(state.saved);
   state.model = model;
+  indexLoadedModel(model);
   cameraIsSaved = Boolean(state.setup.camera);
   syncChrome();
   resizeRenderer();
@@ -254,6 +265,12 @@ function bindUi() {
   els.geoOpacity.addEventListener("input", () => updateSelectedGeometry({ opacity: Number(els.geoOpacity.value) }));
   els.geoAttach.addEventListener("change", () => updateSelectedGeometry({ attach: els.geoAttach.value }));
   els.geoDelete.addEventListener("click", deleteSelectedGeometry);
+  els.growAngle.addEventListener("input", () => {
+    state.growAngle = Number(els.growAngle.value);
+    els.growLabel.textContent = `${state.growAngle} Grad`;
+  });
+  els.fitOk.addEventListener("click", confirmPreview);
+  els.fitCancel.addEventListener("click", cancelPreview);
   els.templateForm.addEventListener("change", readTemplateForm);
   els.templateForm.addEventListener("input", readTemplateForm);
   els.refreshSeconds.addEventListener("change", () => {
@@ -571,8 +588,17 @@ function normalizeGeometry(raw) {
   const points = Array.isArray(raw.points) ? raw.points.map(asVec3).filter(Boolean) : [];
   const geometry = {
     id: raw.id,
-    type: raw.type === "rect" ? "rect" : "circle",
+    type: ["rect", "circle", "plane", "line", "slot", "cylinder", "cone", "sphere"].includes(raw.type) ? raw.type : "circle",
     mode: raw.mode || (raw.type === "rect" ? "rect" : "3"),
+    fitType: raw.fitType || "",
+    summary: raw.summary || "",
+    diameter: isFiniteNumber(raw.diameter) ? raw.diameter : null,
+    length: isFiniteNumber(raw.length) ? raw.length : null,
+    width: isFiniteNumber(raw.width) ? raw.width : null,
+    halfAngle: isFiniteNumber(raw.halfAngle) ? raw.halfAngle : null,
+    drawRadius: isFiniteNumber(raw.drawRadius) ? raw.drawRadius : null,
+    direction: asVec3(raw.direction),
+    apex: asVec3(raw.apex),
     color: typeof raw.color === "string" ? raw.color : GEOMETRY_PALETTE[0],
     lineWidth: clamp(Number(raw.lineWidth) || 2, 1, 8),
     opacity: clamp(Number(raw.opacity) || 0.85, 0.15, 1),
@@ -583,8 +609,9 @@ function normalizeGeometry(raw) {
     radius: isFiniteNumber(raw.radius) ? raw.radius : null,
     corners: Array.isArray(raw.corners) ? raw.corners.map(asVec3).filter(Boolean) : null,
   };
+  if (geometry.mode === "fit" && geometry.center) return geometry;
   recomputeGeometry(geometry);
-  if (geometry.type === "circle" && !geometry.center) return null;
+  if ((geometry.type === "circle" || geometry.mode === "fit") && !geometry.center) return null;
   if (geometry.type === "rect" && !geometry.corners) return null;
   return geometry;
 }
@@ -636,10 +663,19 @@ function serializeGeometry(geometry) {
     lineWidth: geometry.lineWidth,
     opacity: geometry.opacity,
     attach: geometry.attach,
-    points: geometry.points.map(roundVec),
+    points: (geometry.points || []).map(roundVec),
     normal: geometry.normal ? roundVec(geometry.normal) : null,
     center: geometry.center ? roundVec(geometry.center) : null,
     radius: geometry.radius == null ? null : round(geometry.radius, 4),
+    diameter: geometry.diameter == null ? null : round(geometry.diameter, 4),
+    length: geometry.length == null ? null : round(geometry.length, 4),
+    width: geometry.width == null ? null : round(geometry.width, 4),
+    halfAngle: geometry.halfAngle == null ? null : round(geometry.halfAngle, 5),
+    fitType: geometry.fitType || "",
+    summary: geometry.summary || "",
+    drawRadius: geometry.drawRadius == null ? null : round(geometry.drawRadius, 3),
+    direction: geometry.direction ? roundVec(geometry.direction) : null,
+    apex: geometry.apex ? roundVec(geometry.apex) : null,
     corners: geometry.corners ? geometry.corners.map(roundVec) : null,
   };
 }
@@ -1193,29 +1229,123 @@ function onSurfaceClick(hit) {
     updateLeaders();
     return;
   }
-  state.draftPoints.push(hit);
-  const need = state.tool === "circle2" ? 2 : 3;
-  if (state.draftPoints.length < need) {
-    toast(`Punkt ${state.draftPoints.length} von ${need}`);
-    updateLeaders();
+  if (!state.selectedId) {
+    toast(UI.pickFirst);
     return;
   }
-  const geometry = geometryFromDraft();
-  state.draftPoints = [];
-  if (!geometry) {
-    toast(UI.geoBad);
-    updateLeaders();
+  if (!state.meshIndex) {
+    toast("Netz ist noch nicht vorbereitet.");
     return;
   }
-  state.setup.geometries.push(geometry);
-  state.selectedGeometryId = geometry.id;
-  if (state.selectedId) {
-    const placement = state.setup.placements[state.selectedId] || (state.setup.placements[state.selectedId] = {});
-    placement.anchor = { kind: "geometry", geometryId: geometry.id, attach: geometry.attach };
+  try {
+    const faces = growRegion(state.meshIndex, hit.faceIndex, state.growAngle);
+    const boundary = state.tool === "Kreis" || state.tool === "Linie";
+    const samples = regionSamples(state.meshIndex, faces, boundary ? "boundary" : "surface");
+    if (samples.points.length < 3) {
+      toast("Zu wenige Punkte in der Auswahl.");
+      return;
+    }
+    const fit = state.tool === "Auto"
+      ? autoFit(samples.points, samples.normals).best
+      : state.tool === "Kreis"
+        ? fitCircle3D(samples.points, samples.normals[0])
+        : state.tool === "Linie"
+          ? fitLine(samples.points)
+          : fitType(state.tool, samples.points, samples.normals);
+    state.preview = geometryFromFit(fit, samples.points);
+    els.fitSummary.textContent = formatFit(fit);
+    els.fitPreview.hidden = false;
+    rebuildGeometries();
+    toast("Vorschau. Uebernehmen oder nochmal klicken.");
+  } catch (error) {
+    console.error(error);
+    toast(error.message || UI.geoBad);
   }
+}
+
+function confirmPreview() {
+  if (!state.preview || !state.selectedId) return;
+  const placement = state.setup.placements[state.selectedId] || (state.setup.placements[state.selectedId] = {});
+  const previous = placement.anchor?.kind === "geometry"
+    ? state.setup.geometries.find((item) => item.id === placement.anchor.geometryId)
+    : null;
+  if (previous && !window.confirm("Die vorhandene Geometrie dieses Pruefmerkmals ersetzen?")) return;
+  if (previous) state.setup.geometries = state.setup.geometries.filter((item) => item.id !== previous.id);
+  state.setup.geometries.push(state.preview);
+  placement.anchor = { kind: "geometry", geometryId: state.preview.id, attach: "center" };
+  state.selectedGeometryId = state.preview.id;
+  state.preview = null;
+  els.fitPreview.hidden = true;
   rebuildGeometries();
   syncEditor();
   toast(UI.geoMade);
+}
+
+function cancelPreview() {
+  state.preview = null;
+  els.fitPreview.hidden = true;
+  rebuildGeometries();
+}
+
+function geometryFromFit(fit, points = []) {
+  const vec = (v) => (v ? { x: v[0], y: v[1], z: v[2] } : null);
+  let drawRadius = fit.radius || fit.length || 20;
+  if (fit.center && points.length) {
+    let max = 0;
+    for (const point of points) {
+      const d = Math.hypot(point[0] - fit.center[0], point[1] - fit.center[1], point[2] - fit.center[2]);
+      if (d > max) max = d;
+    }
+    if (max > drawRadius) drawRadius = max;
+  }
+  const typeMap = { Kreis: "circle", Ebene: "plane", Linie: "line", Langloch: "slot", Zylinder: "cylinder", Kegel: "cone", Kugel: "sphere" };
+  return {
+    id: `geo-${Date.now().toString(36)}`,
+    type: typeMap[fit.type] || "circle",
+    mode: "fit",
+    fitType: fit.type,
+    color: nextColor(),
+    lineWidth: 2.5,
+    opacity: 0.85,
+    attach: "center",
+    points: [],
+    center: vec(fit.center),
+    normal: vec(fit.normal),
+    direction: vec(fit.direction),
+    apex: vec(fit.apex),
+    radius: fit.radius ?? null,
+    diameter: fit.diameter ?? null,
+    length: fit.length ?? null,
+    width: fit.width ?? null,
+    halfAngle: fit.halfAngle ?? null,
+    summary: formatFit(fit),
+    drawRadius,
+  };
+}
+
+function indexLoadedModel(group) {
+  let found = null;
+  group.traverse((obj) => {
+    if (found || !obj.isMesh) return;
+    const position = obj.geometry.attributes.position.array;
+    const index = obj.geometry.index ? obj.geometry.index.array : null;
+    found = buildMesh(position, index);
+  });
+  state.meshIndex = found;
+}
+
+async function chooseModelUrl() {
+  const demo = new URL("../models/milkyway.obj", import.meta.url).href;
+  const host = location.hostname;
+  if (host !== "localhost" && host !== "127.0.0.1") return demo;
+  try {
+    const live = new URL("../models/live.obj", import.meta.url);
+    const response = await fetch(live.href, { method: "HEAD", cache: "no-store" });
+    if (response.ok) return live.href;
+  } catch {
+    /* example model */
+  }
+  return demo;
 }
 
 function geometryFromDraft() {
@@ -1278,12 +1408,32 @@ function rebuildGeometries() {
   if (!geometryRoot) return;
   for (const group of geometryGroups.values()) geometryRoot.remove(group);
   geometryGroups.clear();
-  for (const geometry of state.setup?.geometries || []) {
+  const drawn = [...(state.setup?.geometries || [])];
+  if (state.preview) drawn.push(state.preview);
+  for (const geometry of drawn) {
     const group = new THREE.Group();
     group.renderOrder = 2;
     const lift = geometry.normal ? scale(normalize(geometry.normal) || geometry.normal, 0.4) : { x: 0, y: 0, z: 0 };
-    if (geometry.type === "circle" && geometry.center && geometry.radius) {
+    const ringTypes = ["circle", "cylinder", "cone", "slot"];
+    if (ringTypes.includes(geometry.type) && geometry.center && geometry.radius) {
       group.add(circleMesh(add(geometry.center, lift), geometry.normal, geometry.radius, geometry));
+      if (geometry.length && geometry.type !== "circle") {
+        const half = scale(normalize(geometry.normal) || geometry.normal, geometry.length / 2);
+        group.add(circleMesh(add(add(geometry.center, lift), half), geometry.normal, geometry.radius, geometry));
+        group.add(circleMesh(add(add(geometry.center, lift), scale(half, -1)), geometry.normal, geometry.radius, geometry));
+      }
+    }
+    if (geometry.type === "sphere" && geometry.center && geometry.radius) {
+      const sphere = new THREE.Mesh(
+        new THREE.SphereGeometry(geometry.radius, 32, 16),
+        new THREE.MeshBasicMaterial({ color: geometry.color, transparent: true, opacity: geometry.opacity * 0.25, depthWrite: false }),
+      );
+      sphere.position.set(geometry.center.x, geometry.center.y, geometry.center.z);
+      group.add(sphere);
+    }
+    if ((geometry.type === "plane" || geometry.type === "line") && geometry.center && geometry.normal) {
+      const radius = Math.max(geometry.drawRadius || geometry.length || geometry.radius || 20, 4);
+      group.add(circleMesh(add(geometry.center, lift), geometry.normal, radius, { ...geometry, lineWidth: geometry.type === "line" ? 1 : geometry.lineWidth }));
     }
     if (geometry.type === "rect" && geometry.corners?.length === 4) {
       group.add(rectMesh(geometry.corners.map((point) => add(point, lift)), geometry));
@@ -1415,7 +1565,11 @@ function pickSurface(event) {
     const world = hit.face.normal.clone().transformDirection(hit.object.matrixWorld).normalize();
     normal = { x: world.x, y: world.y, z: world.z };
   }
-  return { point: { x: hit.point.x, y: hit.point.y, z: hit.point.z }, normal };
+  return {
+    point: { x: hit.point.x, y: hit.point.y, z: hit.point.z },
+    normal,
+    faceIndex: hit.faceIndex ?? 0,
+  };
 }
 
 function syncChrome() {
