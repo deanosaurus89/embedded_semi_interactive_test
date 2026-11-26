@@ -45,10 +45,22 @@ export function normalizeMeasurements(raw) {
     schemaVersion: raw.schemaVersion ?? 1,
     source: raw.source ?? "example",
     refreshSeconds: positiveSeconds(raw.refreshSeconds),
-    part: raw.part ?? { id: "part", name: "Bauteil" },
+    part: normalizePart(raw.part),
     characteristics,
     features,
     fetchedAt: raw.fetchedAt ? String(raw.fetchedAt) : "",
+  };
+}
+
+function normalizePart(part) {
+  const source = part && typeof part === "object" ? part : {};
+  const template = source.template && source.template.id
+    ? { id: String(source.template.id), name: source.template.name ? String(source.template.name) : "" }
+    : null;
+  return {
+    id: source.id ? String(source.id) : "part",
+    name: source.name ? String(source.name) : "Bauteil",
+    template,
   };
 }
 

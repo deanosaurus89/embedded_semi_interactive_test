@@ -51,6 +51,7 @@ const UI = {
 
 const els = {
   partName: document.getElementById("part-name"),
+  templateBadge: document.getElementById("template-badge"),
   dataBadge: document.getElementById("data-badge"),
   setupBadge: document.getElementById("setup-badge"),
   filterCount: document.getElementById("filter-count"),
@@ -117,6 +118,7 @@ const state = {
   filterTo: "",
   viewLocked: true,
   reconnect: false,
+  layoutTemplateId: "",
   model: null,
   warnedLive: false,
 };
@@ -244,20 +246,58 @@ async function main() {
 function acceptData(data, info) {
   state.data = data;
   state.dataMode = info.mode;
-  if (info.initial) {
-    ensurePlacementsForData(false);
+  const templateId = info.mode === "live" ? data.part?.template?.id || "" : "";
+  const templateChanged = info.mode === "live" && templateId !== state.layoutTemplateId;
+  if (info.mode === "live" && (info.initial || info.switched || templateChanged)) {
+    state.layoutTemplateId = templateId;
+    const draft = readDraft();
+    const base = emptySetup();
+    base.labelTemplate = clone(state.published?.labelTemplate || base.labelTemplate);
+    base.refreshSeconds = state.published?.refreshSeconds || base.refreshSeconds;
+    base.camera = draft?.camera || null;
+    state.saved = clone(draft || base);
+    state.setup = clone(state.saved);
+    adoptLivePlacements();
+    state.usingDraft = Boolean(draft);
+    cameraIsSaved = Boolean(state.setup.camera);
+    document.body.dataset.ready = document.body.dataset.ready || "pending";
+    renderFlags();
+    if (!cameraIsSaved && state.model) frameModel(state.model, measureFlagBand());
+    autoPlace();
+    applyAllPositions();
+    rebuildGeometries();
+  } else if (info.initial) {
+    ensurePlacementsForData();
     renderFlags();
     if (!cameraIsSaved && state.model) frameModel(state.model, measureFlagBand());
     autoPlace();
     applyAllPositions();
     rebuildGeometries();
     document.body.dataset.ready = document.body.dataset.ready || "pending";
+  } else if (info.mode === "live") {
+    adoptLivePlacements();
+    refreshFlagContents();
   } else {
     refreshFlagContents();
   }
   syncChrome();
   syncEditor();
   updateLeaders();
+}
+
+function adoptLivePlacements() {
+  const ids = new Set((state.data?.characteristics || []).map((item) => item.id));
+  const kept = {};
+  for (const [key, placement] of Object.entries(state.setup?.placements || {})) {
+    if (ids.has(key)) kept[key] = placement;
+  }
+  state.setup.placements = kept;
+  state.setup.controlMap = {};
+  for (const characteristic of state.data?.characteristics || []) {
+    if (!state.setup.placements[characteristic.id]) {
+      state.setup.placements[characteristic.id] = { flag: null, anchor: null };
+    }
+  }
 }
 
 function bindUi() {
@@ -723,9 +763,14 @@ function normalizeGeometry(raw) {
   return geometry;
 }
 
+function layoutStorageKey() {
+  const templateId = state.dataMode === "live" ? state.data?.part?.template?.id : "";
+  return templateId ? `${SETUP_KEY}:${templateId}` : SETUP_KEY;
+}
+
 function readDraft() {
   try {
-    const modern = localStorage.getItem(SETUP_KEY);
+    const modern = localStorage.getItem(layoutStorageKey());
     if (modern) return normalizeSetup(JSON.parse(modern));
     const legacy = localStorage.getItem(LEGACY_KEY);
     if (legacy) return normalizeSetup(JSON.parse(legacy));
@@ -736,7 +781,7 @@ function readDraft() {
 }
 
 function writeDraft(setup) {
-  localStorage.setItem(SETUP_KEY, JSON.stringify(serializeSetup(setup)));
+  localStorage.setItem(layoutStorageKey(), JSON.stringify(serializeSetup(setup)));
 }
 
 function serializeSetup(setup) {
@@ -2144,6 +2189,11 @@ function syncChrome() {
     ? "Diese Ansicht liegt nur in diesem Browser. Export ersetzen und data/layout.json veroeffentlichen, damit alle sie sehen."
     : "Ansicht aus data/layout.json. Vorbereiten und Abschliessen speichert einen Entwurf nur auf diesem Rechner.";
   if (state.data?.part?.name) els.partName.textContent = state.data.part.name;
+  const template = state.dataMode === "live" ? state.data?.part?.template : null;
+  if (els.templateBadge) {
+    els.templateBadge.hidden = !template?.name;
+    els.templateBadge.textContent = template?.name ? `Vorlage: ${template.name}` : "";
+  }
   els.prepare.hidden = state.edit;
   els.finish.hidden = !state.edit;
   els.discard.hidden = !state.edit;
