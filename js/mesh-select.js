@@ -1,5 +1,5 @@
-// Region growing and brush selection. OBJLoader emits non-indexed triangles, so
-// vertices are welded by position before adjacency is built.
+// OBJLoader emits non-indexed triangles. Vertices are welded by position so a
+// click can snap to a shared Knotenpunkt and so adjacency stays available.
 
 export function weldPositions(positions, indices, tolerance = 1e-4) {
   const triCount = indices ? indices.length / 3 : positions.length / 9;

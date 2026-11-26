@@ -213,11 +213,6 @@ body.is-editing .flag {
   cursor: grab;
 }
 
-body.is-brush .flag,
-body.is-brush #leaders .handle {
-  pointer-events: none;
-}
-
 body.is-editing .flag:active { cursor: grabbing; }
 
 .flag.is-selected {
