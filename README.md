@@ -34,13 +34,19 @@ The page fills whatever size the iframe gets. It does not try to leave the frame
 ## What the page does
 
 - Orbit, zoom, and pan the model (left drag, wheel, right drag).
-- Six example characteristics, each with nominal, USL, LSL, and per-piece actuals. The sparkline draws the values, a dashed nominal line, a dotted mean line, and red USL/LSL lines. Points outside the limits are highlighted.
-- **Teile** keeps the last 10, 25, 50, or all measurements (oldest first in the file, so “letzte” is the tail).
-- **Ansicht** locks the flags so the model can be turned without moving them. **Bearbeiten** lets you drag a flag and, with that flag selected, click the surface to set its anchor (Fußpunkt). The leader line stays attached while the view turns.
-- Positions and anchors are stored in `localStorage` on the Pages origin. **Export** downloads `merkmale-layout.json`. **Import** reads that file back. **Zurücksetzen** (second click confirms) drops the saved layout.
-- To bake a layout into the site, replace [`data/layout.json`](data/layout.json) with an export and redeploy.
+- Characteristic flags with a shared label template: line, bar, or values only; USL/LSL, nominal, mean, ±3σ, Cp/Cpk, decimals, unit, and out-of-tolerance highlighting.
+- **Teile** keeps the last 10, 25, 50, or all loaded measurements (oldest first in the file).
+- **Vorbereiten** turns the part, drags Fußpunkte along the surface, builds a circle (3 points, or center plus edge) or a rectangle patch, assigns a characteristic, and places flags. **Abschließen** stores that camera and layout in `localStorage` on this machine only. The badge then says **Lokaler Entwurf**. Everyone else, and **Zurücksetzen**, uses **Veröffentlichte Ansicht** from [`data/layout.json`](data/layout.json).
+- **Export** downloads `merkmale-einrichtung.json`. Replace `data/layout.json` with it and redeploy so the published page shows that view.
+- `js/data-source.js` reloads the measurements JSON on an interval (default 60 s, `?refresh=` overrides) and updates flag contents without moving the layout. On `localhost` it prefers `/data/live-measurements.json` and shows **Live**. Otherwise it shows **Beispieldaten**.
 
-The amber **Beispieldaten** badge is shown while `source` in the measurements file is `"example"`.
+## Local DataLoop helper
+
+[`local-server/README.md`](local-server/README.md) (German) describes `Start-Merkmal-Viewer.cmd`. It serves this page on `http://localhost:8765/` and fills the live JSON from the DataLoop API. No server URL or token is stored in the repo. The DataLoop embed on that PC is:
+
+```html
+<iframe src="http://localhost:8765/" title="Milkyway Merkmale"></iframe>
+```
 
 ## Local preview
 

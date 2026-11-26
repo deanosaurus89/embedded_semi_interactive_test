@@ -19,7 +19,11 @@
   <body>
     <div id="app">
       <header class="toolbar">
-        <h1>Merkmale <span id="part-name">Milkyway</span> <span class="badge" id="example-badge">Beispieldaten</span></h1>
+        <h1>
+          Merkmale <span id="part-name">Milkyway</span>
+          <span class="badge" id="data-badge">Beispieldaten</span>
+          <span class="badge is-published" id="setup-badge">Veröffentlichte Ansicht</span>
+        </h1>
         <div class="tools">
           <label class="filter">
             Teile
@@ -30,25 +34,107 @@
               <option value="all">Alle</option>
             </select>
           </label>
-          <div class="mode" role="group" aria-label="Modus">
-            <button type="button" id="mode-view" aria-pressed="true" title="Positionen sperren">Ansicht</button>
-            <button type="button" id="mode-edit" aria-pressed="false" title="Fähnchen verschieben und Fußpunkte setzen">Bearbeiten</button>
-          </div>
-          <button type="button" id="export" title="Layout als JSON exportieren">Export</button>
-          <button type="button" id="import" title="Layout-JSON importieren">Import</button>
+          <button type="button" id="prepare">Vorbereiten</button>
+          <button type="button" id="finish" hidden>Abschließen</button>
+          <button type="button" id="discard" hidden>Verwerfen</button>
+          <button type="button" id="export" title="Einrichtung als JSON exportieren">Export</button>
+          <button type="button" id="import" title="Einrichtung importieren, nur dieser Rechner">Import</button>
           <input id="import-file" type="file" accept="application/json,.json" hidden />
-          <button type="button" id="reset" title="Gespeichertes Layout verwerfen">Zurücksetzen</button>
+          <button type="button" id="reset" title="Lokalen Entwurf löschen und die veröffentlichte Ansicht laden">Zurücksetzen</button>
         </div>
       </header>
-      <div id="stage">
-        <canvas id="view" aria-label="3D-Ansicht des Bauteils"></canvas>
-        <svg id="leaders" aria-hidden="true"></svg>
-        <div id="flags"></div>
-        <p id="hint" class="hint" hidden></p>
-        <p id="toast" class="toast" role="status" hidden></p>
-        <div id="loading" role="status" aria-live="polite">
-          <div class="spinner" aria-hidden="true"></div>
-          <p id="loading-text">Modell wird geladen …</p>
+      <div id="workspace">
+        <aside id="editor" hidden>
+          <p class="note">Abschließen speichert Kamera, Geometrien, Fußpunkte, Fähnchen und die Beschriftung nur in diesem Browser (Lokaler Entwurf). Exportieren und <code>data/layout.json</code> ersetzen, damit alle die Ansicht sehen.</p>
+          <h2>Werkzeug</h2>
+          <label>
+            Auf der Fläche
+            <select id="tool">
+              <option value="point">Fußpunkt</option>
+              <option value="circle3">Kreis durch 3 Punkte</option>
+              <option value="circle2">Kreis Mitte + Rand</option>
+              <option value="rect">Rechteckfläche</option>
+            </select>
+          </label>
+          <h2>Fähnchen</h2>
+          <label>
+            Ausgewählt
+            <select id="char-select"></select>
+          </label>
+          <p class="note">Klick auf ein Merkmal ordnet es dem ausgewählten Fähnchen zu. Der Schlüssel ist Objektname / Merkmalname.</p>
+          <div id="char-list" class="char-list"></div>
+          <div id="geo-panel" hidden>
+            <h2>Geometrie</h2>
+            <div class="geo-grid">
+              <label>Farbe <input id="geo-color" type="color" value="#d0121a" /></label>
+              <label>Linie <input id="geo-width" type="range" min="1" max="8" step="0.5" value="2.5" /></label>
+              <label>Deckkraft <input id="geo-opacity" type="range" min="0.15" max="1" step="0.05" value="0.9" /></label>
+              <label>
+                Anbindung
+                <select id="geo-attach">
+                  <option value="center">Mitte</option>
+                  <option value="nearest">Rand, nächster Punkt</option>
+                </select>
+              </label>
+            </div>
+            <button type="button" id="geo-delete">Geometrie löschen</button>
+          </div>
+          <h2>Beschriftung</h2>
+          <form id="template-form">
+            <label>
+              Größe
+              <select data-key="size">
+                <option value="S">S</option>
+                <option value="M" selected>M</option>
+                <option value="L">L</option>
+              </select>
+            </label>
+            <label>
+              Diagramm
+              <select data-key="chart">
+                <option value="line">Linie</option>
+                <option value="bar">Balken</option>
+                <option value="values">Nur Werte</option>
+              </select>
+            </label>
+            <label>
+              Nachkommastellen
+              <select data-key="decimals">
+                <option value="0">0</option>
+                <option value="1">1</option>
+                <option value="2">2</option>
+                <option value="3" selected>3</option>
+                <option value="4">4</option>
+              </select>
+            </label>
+            <div class="checks">
+              <label><input type="checkbox" data-key="showName" checked /> Name</label>
+              <label><input type="checkbox" data-key="showUnit" checked /> Einheit</label>
+              <label><input type="checkbox" data-key="showLastValue" checked /> Istwert</label>
+              <label><input type="checkbox" data-key="showLimits" checked /> USL/LSL</label>
+              <label><input type="checkbox" data-key="showNominal" checked /> Nennwert</label>
+              <label><input type="checkbox" data-key="showMean" checked /> Mittelwert</label>
+              <label><input type="checkbox" data-key="showSigma" checked /> ±3σ</label>
+              <label><input type="checkbox" data-key="showCpk" checked /> Cp/Cpk</label>
+              <label><input type="checkbox" data-key="highlightOot" checked /> außer Tol.</label>
+            </div>
+          </form>
+          <label>
+            Seite aktualisiert alle
+            <input id="refresh-seconds" type="number" min="5" max="3600" step="5" value="60" />
+            Sekunden. Der lokale Helfer holt DataLoop in seinem eigenen Intervall.
+          </label>
+        </aside>
+        <div id="stage">
+          <canvas id="view" aria-label="3D-Ansicht des Bauteils"></canvas>
+          <svg id="leaders" aria-hidden="true"></svg>
+          <div id="flags"></div>
+          <p id="hint" class="hint" hidden></p>
+          <p id="toast" class="toast" role="status" hidden></p>
+          <div id="loading" role="status" aria-live="polite">
+            <div class="spinner" aria-hidden="true"></div>
+            <p id="loading-text">Modell wird geladen …</p>
+          </div>
         </div>
       </div>
     </div>

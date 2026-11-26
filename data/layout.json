@@ -1,25 +1,43 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "space": "obj",
-  "description": "Vorgabe-Layout. anchor liegt im ursprünglichen OBJ-Koordinatensystem (mm, nicht zentriert). flag.x und flag.y sind die linke obere Ecke des Fähnchens als Anteil der Bühnenbreite und -höhe (0–1). flag.pinned true hält die Position beim Ändern der Iframe-Größe. Eine aus der Seite exportierte Datei kann diese Datei ersetzen. localStorage im Browser überschreibt sie.",
+  "description": "Veroeffentlichte Ansicht fuer alle Besucher. anchor.kind point liegt im OBJ-Koordinatensystem (mm). Ein Lokaler Entwurf im Browser ueberschreibt diese Datei nur auf dem Rechner, auf dem Vorbereiten abgeschlossen wurde.",
+  "refreshSeconds": 60,
+  "camera": null,
+  "labelTemplate": {
+    "size": "M",
+    "chart": "line",
+    "showLimits": true,
+    "showNominal": true,
+    "showMean": true,
+    "showSigma": true,
+    "showLastValue": true,
+    "showCpk": true,
+    "highlightOot": true,
+    "decimals": 3,
+    "showUnit": true,
+    "showName": true
+  },
+  "controlMap": {},
+  "geometries": [],
   "placements": {
     "zyl-a-dm": {
-      "anchor": { "x": 37.573, "y": 60.893, "z": 68.75 }
+      "anchor": { "kind": "point", "point": { "x": 37.573, "y": 60.893, "z": 68.75 } }
     },
     "planlauf-deckel": {
-      "anchor": { "x": 168.04, "y": 50.0, "z": 25.954 }
+      "anchor": { "kind": "point", "point": { "x": 168.04, "y": 50.0, "z": 25.954 } }
     },
     "pos-bohrung-b": {
-      "anchor": { "x": 304.651, "y": 148.637, "z": 73.425 }
+      "anchor": { "kind": "point", "point": { "x": 304.651, "y": 148.637, "z": 73.425 } }
     },
     "abstand-anschraub": {
-      "anchor": { "x": 425.295, "y": 147.957, "z": 74.026 }
+      "anchor": { "kind": "point", "point": { "x": 425.295, "y": 147.957, "z": 74.026 } }
     },
     "ebenheit-dichtung": {
-      "anchor": { "x": 529.167, "y": 127.605, "z": 53.451 }
+      "anchor": { "kind": "point", "point": { "x": 529.167, "y": 127.605, "z": 53.451 } }
     },
     "rundheit-lager": {
-      "anchor": { "x": 610.0, "y": 56.078, "z": -46.364 }
+      "anchor": { "kind": "point", "point": { "x": 610.0, "y": 56.078, "z": -46.364 } }
     }
   }
 }

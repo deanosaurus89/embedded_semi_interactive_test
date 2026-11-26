@@ -1,45 +1,65 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { OBJLoader } from "three/addons/loaders/OBJLoader.js";
+import { createDataSource } from "./data-source.js";
+import {
+  add,
+  scale,
+  normalize,
+  basisFromNormal,
+  circleFromThreePoints,
+  circleFromCenterAndEdge,
+  rectangleFromThreePoints,
+  sampleCircle,
+  GEOMETRY_PALETTE,
+} from "./geometry.js";
+import { DEFAULT_TEMPLATE, normalizeTemplate, renderFlag } from "./label-template.js";
 
-// Anchors are stored in the original OBJ coordinate system (millimetres,
-// untransformed). Flag positions are the card's top-left as a fraction of
-// the stage. The mesh itself is not moved, so a raycast hit is already in
-// that same space and can be written straight into the layout.
+// Anchors and geometries are stored in the original OBJ coordinate system.
+// The mesh is not moved, so a raycast hit can be saved as-is.
+// data/layout.json is the published view. localStorage is a draft on this
+// machine only and is written when the user finishes preparation.
 
-const LAYOUT_KEY = "milkyway-merkmale-layout-v1";
+const SETUP_KEY = "milkyway-setup-v2";
+const LEGACY_KEY = "milkyway-merkmale-layout-v1";
 const FILTER_KEY = "milkyway-merkmale-filter-v1";
 const SVG_NS = "http://www.w3.org/2000/svg";
 
 const UI = {
   loading: "Modell wird geladen …",
   modelError: "Das Modell konnte nicht geladen werden.",
-  dataError: "Die Beispieldaten konnten nicht geladen werden.",
+  dataError: "Die Daten konnten nicht geladen werden.",
   webglError: "WebGL ist in diesem Browser nicht verfügbar.",
   emptyModel: "Das Modell enthält keine Flächen.",
-  hintIdle: "Fähnchen ziehen zum Positionieren. Ein Klick auf die Oberfläche setzt den Fußpunkt.",
+  hint: "Fähnchen ziehen. Fußpunkt auf der Fläche ziehen oder neu setzen. Geometrie mit dem gewählten Werkzeug aufbauen.",
   pickFirst: "Zuerst ein Fähnchen auswählen.",
   pickMiss: "Kein Treffer auf der Oberfläche.",
   anchorSet: "Fußpunkt gesetzt.",
-  exported: "Layout exportiert.",
-  imported: "Layout importiert.",
-  reset: "Layout zurückgesetzt.",
-  importInvalid: "Die Datei enthält kein gültiges Layout.",
-  noValues: "Keine Istwerte",
-  inTol: "in Toleranz",
-  outTol: "außer Toleranz",
+  geoMade: "Geometrie erzeugt.",
+  geoBad: "Diese Punkte ergeben keine Geometrie.",
+  finished: "Einrichtung auf diesem Rechner gespeichert (Lokaler Entwurf).",
+  discarded: "Ungespeicherte Änderungen verworfen.",
+  exported: "Einrichtung exportiert. Für alle: Datei als data/layout.json veröffentlichen.",
+  imported: "Einrichtung importiert (nur dieser Rechner).",
+  importInvalid: "Die Datei enthält keine gültige Einrichtung.",
+  reset: "Lokaler Entwurf gelöscht. Veröffentlichte Ansicht geladen.",
+  liveDown: "Live-Daten kurz nicht erreichbar. Letzte Werte bleiben.",
+  assigned: "Merkmal zugeordnet.",
 };
 
 const els = {
   partName: document.getElementById("part-name"),
-  badge: document.getElementById("example-badge"),
+  dataBadge: document.getElementById("data-badge"),
+  setupBadge: document.getElementById("setup-badge"),
   filter: document.getElementById("filter"),
-  modeView: document.getElementById("mode-view"),
-  modeEdit: document.getElementById("mode-edit"),
+  prepare: document.getElementById("prepare"),
+  finish: document.getElementById("finish"),
+  discard: document.getElementById("discard"),
   exportBtn: document.getElementById("export"),
   importBtn: document.getElementById("import"),
   importFile: document.getElementById("import-file"),
   resetBtn: document.getElementById("reset"),
+  editor: document.getElementById("editor"),
   stage: document.getElementById("stage"),
   view: document.getElementById("view"),
   leaders: document.getElementById("leaders"),
@@ -48,37 +68,53 @@ const els = {
   toast: document.getElementById("toast"),
   loading: document.getElementById("loading"),
   loadingText: document.getElementById("loading-text"),
+  tool: document.getElementById("tool"),
+  charSelect: document.getElementById("char-select"),
+  charList: document.getElementById("char-list"),
+  geoPanel: document.getElementById("geo-panel"),
+  geoColor: document.getElementById("geo-color"),
+  geoWidth: document.getElementById("geo-width"),
+  geoOpacity: document.getElementById("geo-opacity"),
+  geoAttach: document.getElementById("geo-attach"),
+  geoDelete: document.getElementById("geo-delete"),
+  templateForm: document.getElementById("template-form"),
+  refreshSeconds: document.getElementById("refresh-seconds"),
 };
-
-const fmt = new Intl.NumberFormat("de-DE", {
-  minimumFractionDigits: 3,
-  maximumFractionDigits: 3,
-});
 
 const state = {
   data: null,
-  baked: null,
-  placements: {},
-  filter: "25",
+  dataMode: "example",
+  published: null,
+  saved: null,
+  setup: null,
+  usingDraft: false,
   edit: false,
   selectedId: null,
+  selectedGeometryId: null,
+  tool: "point",
+  draftPoints: [],
+  filter: "25",
   model: null,
+  warnedLive: false,
 };
 
-const leaderNodes = new Map();
+const geometryGroups = new Map();
 const scratch = new THREE.Vector3();
 const pointerNdc = new THREE.Vector2();
-
 let renderer;
 let scene;
 let camera;
 let controls;
 let raycaster;
-let resetTimer = 0;
+let geometryRoot;
 let toastTimer = 0;
 let loopOn = false;
 let pointerDown = null;
-let cameraMovedByUser = false;
+let handleDrag = null;
+let discardTimer = 0;
+let resetTimer = 0;
+let cameraIsSaved = false;
+let source;
 
 const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
@@ -92,49 +128,89 @@ async function main() {
   restoreFilter();
   initViewer();
 
-  const dataUrl = new URL("../data/example-measurements.json", import.meta.url);
+  const params = new URLSearchParams(location.search);
   const layoutUrl = new URL("../data/layout.json", import.meta.url);
+  const exampleUrl = new URL("../data/example-measurements.json", import.meta.url);
+  const liveUrl = new URL("../data/live-measurements.json", import.meta.url);
   const modelUrl = new URL("../models/milkyway.obj", import.meta.url);
 
-  const dataPromise = fetchJson(dataUrl);
-  const layoutPromise = fetchJson(layoutUrl).catch(() => ({ placements: {} }));
-  const modelPromise = loadModel(modelUrl.href);
+  const [layout, model] = await Promise.all([
+    fetch(layoutUrl)
+      .then((response) => (response.ok ? response.json() : { placements: {} }))
+      .catch(() => ({ placements: {} })),
+    loadModel(modelUrl.href),
+  ]);
 
-  const [data, baked, model] = await Promise.all([dataPromise, layoutPromise, modelPromise]);
-  state.data = normalizeData(data);
-  state.baked = baked && typeof baked === "object" ? baked : { placements: {} };
+  state.published = normalizeSetup(layout);
+  const draft = readDraft();
+  state.usingDraft = Boolean(draft);
+  state.saved = clone(draft || state.published);
+  state.setup = clone(state.saved);
   state.model = model;
-
-  if (state.data.part?.name) els.partName.textContent = state.data.part.name;
-  if (state.data.source !== "example") els.badge.hidden = true;
-
-  initPlacements();
+  cameraIsSaved = Boolean(state.setup.camera);
+  syncChrome();
   resizeRenderer();
-  renderFlags();
-  frameModel(model, measureFlagBand());
-  autoPlace();
-  applyAllPositions();
-  syncLeaderNodes();
-  updateLeaders();
-  reveal();
-  startLoop();
+  if (state.setup.camera) applyCamera(state.setup.camera);
+  else frameModel(model, null);
+  rebuildGeometries();
+
+  source = createDataSource({
+    exampleUrl: exampleUrl.href,
+    liveUrl: liveUrl.href,
+    intervalSeconds: () => {
+      const fromQuery = Number(params.get("refresh"));
+      if (Number.isFinite(fromQuery) && fromQuery >= 5) return fromQuery;
+      return state.setup?.refreshSeconds || state.data?.refreshSeconds || 60;
+    },
+    onData: acceptData,
+    onStatus: (status) => {
+      if (!status.ok && status.mode === "live" && !state.warnedLive) {
+        state.warnedLive = true;
+        toast(UI.liveDown);
+      }
+      if (status.ok) state.warnedLive = false;
+    },
+  });
+  await source.start();
 
   const observer = new ResizeObserver(() => {
     resizeRenderer();
-    if (!cameraMovedByUser && state.model) frameModel(state.model, measureFlagBand());
+    if (!cameraIsSaved && !state.userMovedCamera && state.model) frameModel(state.model, measureFlagBand());
     autoPlace();
     applyAllPositions();
     updateLeaders();
   });
   observer.observe(els.stage);
+  reveal();
+  startLoop();
 
-  if (new URLSearchParams(location.search).has("debug")) {
+  if (params.has("debug")) {
     window.__merkmale = {
       state,
-      currentLayout,
+      currentSetup,
       projectToStage,
+      acceptData,
     };
   }
+}
+
+function acceptData(data, info) {
+  state.data = data;
+  state.dataMode = info.mode;
+  if (info.initial) {
+    ensurePlacementsForData(false);
+    renderFlags();
+    if (!cameraIsSaved && state.model) frameModel(state.model, measureFlagBand());
+    autoPlace();
+    applyAllPositions();
+    rebuildGeometries();
+    document.body.dataset.ready = document.body.dataset.ready || "pending";
+  } else {
+    refreshFlagContents();
+  }
+  syncChrome();
+  syncEditor();
+  updateLeaders();
 }
 
 function bindUi() {
@@ -143,21 +219,50 @@ function bindUi() {
     try {
       localStorage.setItem(FILTER_KEY, state.filter);
     } catch {
-      /* private mode */
+      /* ignore */
     }
     refreshFlagContents();
-    autoPlace();
-    applyAllPositions();
-    updateLeaders();
   });
-
-  els.modeView.addEventListener("click", () => setEdit(false));
-  els.modeEdit.addEventListener("click", () => setEdit(true));
-  els.exportBtn.addEventListener("click", exportLayout);
+  els.prepare.addEventListener("click", () => beginEdit());
+  els.finish.addEventListener("click", () => finishEdit());
+  els.discard.addEventListener("click", () => discardEdit());
+  els.exportBtn.addEventListener("click", exportSetup);
   els.importBtn.addEventListener("click", () => els.importFile.click());
   els.importFile.addEventListener("change", onImportFile);
   els.resetBtn.addEventListener("click", onResetClick);
+  els.tool.addEventListener("change", () => {
+    state.tool = els.tool.value;
+    state.draftPoints = [];
+    updateHint();
+  });
+  els.charSelect.addEventListener("change", () => {
+    state.selectedId = els.charSelect.value || null;
+    markSelection();
+    updateHint();
+    updateLeaders();
+  });
+  els.charList.addEventListener("click", (event) => {
+    const row = event.target.closest("[data-char]");
+    if (!row || !state.selectedId) return;
+    state.setup.controlMap[state.selectedId] = row.dataset.char;
+    refreshFlagContents();
+    syncEditor();
+    toast(UI.assigned);
+  });
+  els.geoColor.addEventListener("input", () => updateSelectedGeometry({ color: els.geoColor.value }));
+  els.geoWidth.addEventListener("input", () => updateSelectedGeometry({ lineWidth: Number(els.geoWidth.value) }));
+  els.geoOpacity.addEventListener("input", () => updateSelectedGeometry({ opacity: Number(els.geoOpacity.value) }));
+  els.geoAttach.addEventListener("change", () => updateSelectedGeometry({ attach: els.geoAttach.value }));
+  els.geoDelete.addEventListener("click", deleteSelectedGeometry);
+  els.templateForm.addEventListener("change", readTemplateForm);
+  els.templateForm.addEventListener("input", readTemplateForm);
+  els.refreshSeconds.addEventListener("change", () => {
+    const value = Number(els.refreshSeconds.value);
+    if (Number.isFinite(value)) state.setup.refreshSeconds = Math.max(5, Math.min(3600, value));
+    source?.restart();
+  });
   els.flags.addEventListener("pointerdown", onFlagPointerDown);
+  els.leaders.addEventListener("pointerdown", onHandlePointerDown);
   els.view.addEventListener("pointerdown", onViewPointerDown);
   els.view.addEventListener("pointerup", onViewPointerUp);
   els.view.addEventListener("pointercancel", () => {
@@ -196,26 +301,21 @@ function initViewer() {
   }
   renderer.setClearColor(0x000000, 0);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
-
   scene = new THREE.Scene();
   camera = new THREE.PerspectiveCamera(32, 1, 0.1, 10000);
   scene.add(camera);
-
-  const hemi = new THREE.HemisphereLight(0xf7f8fb, 0x9aa3ad, 0.62);
-  scene.add(hemi);
-
+  scene.add(new THREE.HemisphereLight(0xf7f8fb, 0x9aa3ad, 0.62));
   const key = new THREE.DirectionalLight(0xffffff, 1.25);
   key.position.set(0.35, 0.65, 1);
   camera.add(key);
-
   const fill = new THREE.DirectionalLight(0xd5e2f2, 0.45);
   fill.position.set(-0.9, 0.15, -0.35);
   scene.add(fill);
-
   const rim = new THREE.DirectionalLight(0xffffff, 0.28);
   rim.position.set(-0.2, 0.9, -0.6);
   scene.add(rim);
-
+  geometryRoot = new THREE.Group();
+  scene.add(geometryRoot);
   controls = new OrbitControls(camera, els.view);
   controls.enableDamping = !reduceMotion;
   controls.dampingFactor = 0.08;
@@ -224,7 +324,7 @@ function initViewer() {
   controls.panSpeed = 0.75;
   controls.screenSpacePanning = true;
   controls.addEventListener("start", () => {
-    cameraMovedByUser = true;
+    state.userMovedCamera = true;
   });
   raycaster = new THREE.Raycaster();
 }
@@ -256,8 +356,7 @@ function loadModel(url) {
       },
       (event) => {
         if (event.lengthComputable) {
-          const pct = Math.round((event.loaded / event.total) * 100);
-          els.loadingText.textContent = `${UI.loading} ${pct} %`;
+          els.loadingText.textContent = `${UI.loading} ${Math.round((event.loaded / event.total) * 100)} %`;
         }
       },
       (error) => {
@@ -281,9 +380,7 @@ function resizeRenderer() {
 
 function measureFlagBand() {
   let maxHeight = 0;
-  for (const element of els.flags.querySelectorAll(".flag")) {
-    maxHeight = Math.max(maxHeight, element.offsetHeight);
-  }
+  for (const element of els.flags.querySelectorAll(".flag")) maxHeight = Math.max(maxHeight, element.offsetHeight);
   return maxHeight ? maxHeight + 12 : null;
 }
 
@@ -295,18 +392,12 @@ function frameModel(object, preferredBand) {
   camera.near = Math.max(0.1, radius / 300);
   camera.far = radius * 40;
   controls.target.copy(center);
-
   const stageW = Math.max(1, els.stage.clientWidth);
   const stageH = Math.max(1, els.stage.clientHeight);
   const minModel = Math.min(120, stageH * 0.32);
-  let band = preferredBand ?? reservedBand(stageH);
+  let band = preferredBand ?? (stageH < 360 ? Math.max(64, stageH * 0.24) : Math.min(176, Math.max(96, stageH * 0.28)));
   if (stageH - band * 2 < minModel) band = Math.max(36, (stageH - minModel) / 2);
-  const minX = stageW * 0.03;
-  const maxX = stageW * 0.97;
-  const minY = band;
-  const maxY = Math.max(band + 40, stageH - band);
   const dir = new THREE.Vector3(0.5, 0.42, 1).normalize();
-
   let lo = radius * 0.35;
   let hi = radius * 10;
   let best = hi;
@@ -316,13 +407,11 @@ function frameModel(object, preferredBand) {
     camera.updateProjectionMatrix();
     camera.updateMatrixWorld(true);
     const span = projectBox(box, stageW, stageH);
-    const fits = span && span.minX >= minX && span.maxX <= maxX && span.minY >= minY && span.maxY <= maxY;
+    const fits = span && span.minX >= stageW * 0.03 && span.maxX <= stageW * 0.97 && span.minY >= band && span.maxY <= Math.max(band + 40, stageH - band);
     if (fits) {
       best = dist;
       hi = dist;
-    } else {
-      lo = dist;
-    }
+    } else lo = dist;
   }
   camera.position.copy(center).addScaledVector(dir, best);
   camera.updateProjectionMatrix();
@@ -330,11 +419,6 @@ function frameModel(object, preferredBand) {
   controls.minDistance = radius * 0.12;
   controls.maxDistance = radius * 8;
   controls.update();
-}
-
-function reservedBand(stageH) {
-  if (stageH < 360) return Math.max(64, stageH * 0.24);
-  return Math.min(176, Math.max(96, stageH * 0.28));
 }
 
 function projectBox(box, stageW, stageH) {
@@ -369,10 +453,7 @@ function projectToStage(anchor, stageW = els.stage.clientWidth, stageH = els.sta
   scratch.applyMatrix4(camera.matrixWorldInverse);
   if (scratch.z >= 0) return null;
   scratch.applyMatrix4(camera.projectionMatrix);
-  return {
-    x: (scratch.x * 0.5 + 0.5) * stageW,
-    y: (-scratch.y * 0.5 + 0.5) * stageH,
-  };
+  return { x: (scratch.x * 0.5 + 0.5) * stageW, y: (-scratch.y * 0.5 + 0.5) * stageH };
 }
 
 function reveal() {
@@ -402,284 +483,458 @@ function tick() {
   updateLeaders();
 }
 
-function normalizeData(raw) {
-  if (!raw || !Array.isArray(raw.characteristics)) {
-    throw new Error("measurements schema");
-  }
-  const characteristics = raw.characteristics.filter(validCharacteristic).map((characteristic) => ({
-    ...characteristic,
-    unit: characteristic.unit || "mm",
-    measurements: characteristic.measurements
-      .map((sample) => ({
-        pieceId: String(sample.pieceId ?? ""),
-        value: Number(sample.value),
-        timestamp: sample.timestamp ? String(sample.timestamp) : undefined,
-      }))
-      .filter((sample) => Number.isFinite(sample.value)),
-  }));
+function emptySetup() {
   return {
-    schemaVersion: raw.schemaVersion ?? 1,
-    source: raw.source ?? "example",
-    part: raw.part ?? { id: "part", name: "Bauteil" },
-    characteristics,
+    schemaVersion: 2,
+    space: "obj",
+    refreshSeconds: 60,
+    camera: null,
+    labelTemplate: { ...DEFAULT_TEMPLATE },
+    geometries: [],
+    controlMap: {},
+    placements: {},
   };
 }
 
-function validCharacteristic(characteristic) {
-  return (
-    characteristic &&
-    typeof characteristic.id === "string" &&
-    Array.isArray(characteristic.measurements) &&
-    [characteristic.nominal, characteristic.usl, characteristic.lsl].every(isFiniteNumber)
-  );
-}
-
-function isFiniteNumber(value) {
-  return typeof value === "number" && Number.isFinite(value);
-}
-
-function initPlacements() {
-  const saved = readSaved();
-  state.placements = {};
-  for (const characteristic of state.data.characteristics) {
-    const fromSave = sanitizePlacement(saved?.placements?.[characteristic.id]);
-    const fromBake = sanitizePlacement(state.baked?.placements?.[characteristic.id]);
-    const fallback = sanitizePlacement({ anchor: characteristic.defaultAnchor });
-    const flag =
-      (fromSave?.flag?.pinned ? fromSave.flag : null) ||
-      (fromBake?.flag?.pinned ? fromBake.flag : null) ||
-      null;
-    const anchor = fromSave?.anchor || fromBake?.anchor || fallback?.anchor || null;
-    state.placements[characteristic.id] = { flag, anchor };
+function normalizeSetup(raw) {
+  const setup = emptySetup();
+  if (!raw || typeof raw !== "object") return setup;
+  const refresh = Number(raw.refreshSeconds);
+  if (Number.isFinite(refresh)) setup.refreshSeconds = Math.max(5, Math.min(3600, refresh));
+  setup.labelTemplate = normalizeTemplate(raw.labelTemplate);
+  setup.camera = normalizeCamera(raw.camera);
+  setup.geometries = Array.isArray(raw.geometries) ? raw.geometries.map(normalizeGeometry).filter(Boolean) : [];
+  setup.controlMap = {};
+  if (raw.controlMap && typeof raw.controlMap === "object") {
+    for (const [key, value] of Object.entries(raw.controlMap)) {
+      if (typeof value === "string" && value) setup.controlMap[key] = value;
+    }
   }
+  const sourcePlacements = raw.placements && typeof raw.placements === "object" ? raw.placements : {};
+  for (const [key, value] of Object.entries(sourcePlacements)) {
+    const placement = normalizePlacement(value);
+    if (placement) setup.placements[key] = placement;
+  }
+  return setup;
 }
 
-function sanitizePlacement(placement) {
-  if (!placement || typeof placement !== "object") return null;
-  const clean = {};
-  const flag = placement.flag;
-  if (flag && isFiniteNumber(flag.x) && isFiniteNumber(flag.y)) {
-    clean.flag = {
-      x: clamp(flag.x, -0.5, 1.5),
-      y: clamp(flag.y, -0.5, 1.5),
-      pinned: flag.pinned !== false,
+function normalizeCamera(cameraValue) {
+  if (!cameraValue) return null;
+  const position = asVec3(cameraValue.position);
+  const target = asVec3(cameraValue.target);
+  if (!position || !target) return null;
+  const fov = Number(cameraValue.fov);
+  return { position, target, fov: Number.isFinite(fov) ? fov : 32 };
+}
+
+function asVec3(value) {
+  if (Array.isArray(value) && value.length >= 3 && value.every(isFiniteNumber)) {
+    return { x: value[0], y: value[1], z: value[2] };
+  }
+  if (value && isFiniteNumber(value.x) && isFiniteNumber(value.y) && isFiniteNumber(value.z)) {
+    return { x: value.x, y: value.y, z: value.z };
+  }
+  return null;
+}
+
+function normalizePlacement(value) {
+  if (!value || typeof value !== "object") return null;
+  const placement = {};
+  if (value.flag && isFiniteNumber(value.flag.x) && isFiniteNumber(value.flag.y)) {
+    placement.flag = {
+      x: clamp(value.flag.x, -0.5, 1.5),
+      y: clamp(value.flag.y, -0.5, 1.5),
+      pinned: value.flag.pinned !== false,
     };
   }
-  const anchor = placement.anchor;
-  if (anchor && isFiniteNumber(anchor.x) && isFiniteNumber(anchor.y) && isFiniteNumber(anchor.z)) {
-    clean.anchor = { x: anchor.x, y: anchor.y, z: anchor.z };
-  }
-  return clean.flag || clean.anchor ? clean : null;
+  placement.anchor = normalizeAnchor(value.anchor);
+  if (!placement.flag && !placement.anchor) return null;
+  return placement;
 }
 
-function readSaved() {
-  try {
-    const raw = localStorage.getItem(LAYOUT_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed.placements !== "object") return null;
-    return parsed;
-  } catch {
-    return null;
+function normalizeAnchor(anchor) {
+  if (!anchor || typeof anchor !== "object") return null;
+  if ((anchor.kind === "geometry" || anchor.geometryId) && typeof (anchor.geometryId) === "string") {
+    return {
+      kind: "geometry",
+      geometryId: anchor.geometryId,
+      attach: anchor.attach === "nearest" ? "nearest" : "center",
+    };
   }
+  const point = asVec3(anchor.point || anchor);
+  if (!point) return null;
+  return { kind: "point", point };
 }
 
-function saveLocal() {
-  try {
-    localStorage.setItem(LAYOUT_KEY, JSON.stringify(currentLayout()));
-  } catch {
-    /* private mode or full storage */
-  }
-}
-
-function currentLayout() {
-  const placements = {};
-  for (const characteristic of state.data.characteristics) {
-    const placement = state.placements[characteristic.id] ?? {};
-    const entry = {};
-    if (placement.flag) {
-      entry.flag = {
-        x: round(placement.flag.x, 4),
-        y: round(placement.flag.y, 4),
-        pinned: Boolean(placement.flag.pinned),
-      };
-    }
-    if (placement.anchor) {
-      entry.anchor = {
-        x: round(placement.anchor.x, 3),
-        y: round(placement.anchor.y, 3),
-        z: round(placement.anchor.z, 3),
-      };
-    }
-    placements[characteristic.id] = entry;
-  }
-  return {
-    schemaVersion: 1,
-    space: "obj",
-    part: state.data.part?.id ?? "part",
-    placements,
+function normalizeGeometry(raw) {
+  if (!raw || typeof raw !== "object" || typeof raw.id !== "string") return null;
+  const points = Array.isArray(raw.points) ? raw.points.map(asVec3).filter(Boolean) : [];
+  const geometry = {
+    id: raw.id,
+    type: raw.type === "rect" ? "rect" : "circle",
+    mode: raw.mode || (raw.type === "rect" ? "rect" : "3"),
+    color: typeof raw.color === "string" ? raw.color : GEOMETRY_PALETTE[0],
+    lineWidth: clamp(Number(raw.lineWidth) || 2, 1, 8),
+    opacity: clamp(Number(raw.opacity) || 0.85, 0.15, 1),
+    attach: raw.attach === "nearest" ? "nearest" : "center",
+    points,
+    normal: asVec3(raw.normal),
+    center: asVec3(raw.center),
+    radius: isFiniteNumber(raw.radius) ? raw.radius : null,
+    corners: Array.isArray(raw.corners) ? raw.corners.map(asVec3).filter(Boolean) : null,
   };
+  recomputeGeometry(geometry);
+  if (geometry.type === "circle" && !geometry.center) return null;
+  if (geometry.type === "rect" && !geometry.corners) return null;
+  return geometry;
+}
+
+function readDraft() {
+  try {
+    const modern = localStorage.getItem(SETUP_KEY);
+    if (modern) return normalizeSetup(JSON.parse(modern));
+    const legacy = localStorage.getItem(LEGACY_KEY);
+    if (legacy) return normalizeSetup(JSON.parse(legacy));
+  } catch {
+    /* ignore broken storage */
+  }
+  return null;
+}
+
+function writeDraft(setup) {
+  localStorage.setItem(SETUP_KEY, JSON.stringify(serializeSetup(setup)));
+}
+
+function serializeSetup(setup) {
+  return {
+    schemaVersion: 2,
+    space: "obj",
+    description: "Veroeffentlichte Ansicht, wenn diese Datei data/layout.json ist. Ein Lokaler Entwurf im Browser gilt nur auf diesem Rechner.",
+    refreshSeconds: setup.refreshSeconds,
+    camera: setup.camera
+      ? {
+          position: roundVec(setup.camera.position),
+          target: roundVec(setup.camera.target),
+          fov: setup.camera.fov,
+        }
+      : null,
+    labelTemplate: { ...setup.labelTemplate },
+    controlMap: { ...setup.controlMap },
+    geometries: setup.geometries.map(serializeGeometry),
+    placements: Object.fromEntries(
+      Object.entries(setup.placements).map(([key, placement]) => [key, serializePlacement(placement)]),
+    ),
+  };
+}
+
+function serializeGeometry(geometry) {
+  return {
+    id: geometry.id,
+    type: geometry.type,
+    mode: geometry.mode,
+    color: geometry.color,
+    lineWidth: geometry.lineWidth,
+    opacity: geometry.opacity,
+    attach: geometry.attach,
+    points: geometry.points.map(roundVec),
+    normal: geometry.normal ? roundVec(geometry.normal) : null,
+    center: geometry.center ? roundVec(geometry.center) : null,
+    radius: geometry.radius == null ? null : round(geometry.radius, 4),
+    corners: geometry.corners ? geometry.corners.map(roundVec) : null,
+  };
+}
+
+function serializePlacement(placement) {
+  const entry = {};
+  if (placement.flag) {
+    entry.flag = { x: round(placement.flag.x, 4), y: round(placement.flag.y, 4), pinned: Boolean(placement.flag.pinned) };
+  }
+  if (placement.anchor?.kind === "geometry") {
+    entry.anchor = {
+      kind: "geometry",
+      geometryId: placement.anchor.geometryId,
+      attach: placement.anchor.attach || "center",
+    };
+  } else if (placement.anchor?.point) {
+    entry.anchor = { kind: "point", point: roundVec(placement.anchor.point) };
+  }
+  return entry;
+}
+
+function currentSetup() {
+  return serializeSetup(state.setup);
+}
+
+function captureCamera() {
+  return {
+    position: { x: camera.position.x, y: camera.position.y, z: camera.position.z },
+    target: { x: controls.target.x, y: controls.target.y, z: controls.target.z },
+    fov: camera.fov,
+  };
+}
+
+function applyCamera(saved) {
+  const position = asVec3(saved.position);
+  const target = asVec3(saved.target);
+  if (!position || !target) return;
+  camera.position.set(position.x, position.y, position.z);
+  controls.target.set(target.x, target.y, target.z);
+  camera.fov = saved.fov || 32;
+  camera.updateProjectionMatrix();
+  controls.update();
+  camera.updateMatrixWorld(true);
+}
+
+function beginEdit() {
+  state.edit = true;
+  state.setup = clone(state.saved);
+  document.body.classList.add("is-editing");
+  els.editor.hidden = false;
+  syncChrome();
+  syncEditor();
+  resizeRenderer();
+  updateHint();
+  updateLeaders();
+}
+
+function finishEdit() {
+  state.setup.camera = captureCamera();
+  cameraIsSaved = true;
+  try {
+    writeDraft(state.setup);
+  } catch {
+    toast("Der Entwurf konnte nicht lokal gespeichert werden.");
+    return;
+  }
+  state.saved = clone(state.setup);
+  state.usingDraft = true;
+  state.edit = false;
+  state.draftPoints = [];
+  document.body.classList.remove("is-editing");
+  els.editor.hidden = true;
+  syncChrome();
+  updateHint();
+  updateLeaders();
+  toast(UI.finished);
+}
+
+function discardEdit() {
+  if (els.discard.dataset.armed !== "true") {
+    els.discard.dataset.armed = "true";
+    els.discard.textContent = "Sicher?";
+    clearTimeout(discardTimer);
+    discardTimer = setTimeout(() => {
+      els.discard.dataset.armed = "false";
+      els.discard.textContent = "Verwerfen";
+    }, 3500);
+    return;
+  }
+  clearTimeout(discardTimer);
+  els.discard.dataset.armed = "false";
+  els.discard.textContent = "Verwerfen";
+  state.setup = clone(state.saved);
+  state.edit = false;
+  state.draftPoints = [];
+  state.selectedGeometryId = null;
+  cameraIsSaved = Boolean(state.setup.camera);
+  if (state.setup.camera) applyCamera(state.setup.camera);
+  document.body.classList.remove("is-editing");
+  els.editor.hidden = true;
+  rebuildGeometries();
+  renderFlags();
+  autoPlace();
+  applyAllPositions();
+  syncChrome();
+  updateHint();
+  toast(UI.discarded);
+}
+
+function onResetClick() {
+  if (els.resetBtn.dataset.armed !== "true") {
+    els.resetBtn.dataset.armed = "true";
+    els.resetBtn.textContent = "Sicher?";
+    clearTimeout(resetTimer);
+    resetTimer = setTimeout(() => {
+      els.resetBtn.dataset.armed = "false";
+      els.resetBtn.textContent = "Zurücksetzen";
+    }, 3500);
+    return;
+  }
+  clearTimeout(resetTimer);
+  els.resetBtn.dataset.armed = "false";
+  els.resetBtn.textContent = "Zurücksetzen";
+  try {
+    localStorage.removeItem(SETUP_KEY);
+    localStorage.removeItem(LEGACY_KEY);
+  } catch {
+    /* ignore */
+  }
+  state.usingDraft = false;
+  state.saved = clone(state.published);
+  state.setup = clone(state.saved);
+  state.edit = false;
+  state.draftPoints = [];
+  state.selectedGeometryId = null;
+  cameraIsSaved = Boolean(state.setup.camera);
+  document.body.classList.remove("is-editing");
+  els.editor.hidden = true;
+  if (state.setup.camera) applyCamera(state.setup.camera);
+  else if (state.model) frameModel(state.model, measureFlagBand());
+  rebuildGeometries();
+  renderFlags();
+  autoPlace();
+  applyAllPositions();
+  syncChrome();
+  toast(UI.reset);
+}
+
+function exportSetup() {
+  const payload = serializeSetup(state.edit ? state.setup : state.saved);
+  if (state.edit) payload.camera = roundCamera(captureCamera());
+  const blob = new Blob([JSON.stringify(payload, null, 2) + "\n"], { type: "application/json" });
+  const link = document.createElement("a");
+  const url = URL.createObjectURL(blob);
+  link.href = url;
+  link.download = "merkmale-einrichtung.json";
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1500);
+  toast(UI.exported);
+}
+
+function roundCamera(cameraValue) {
+  return {
+    position: roundVec(cameraValue.position),
+    target: roundVec(cameraValue.target),
+    fov: cameraValue.fov,
+  };
+}
+
+async function onImportFile() {
+  const file = els.importFile.files?.[0];
+  els.importFile.value = "";
+  if (!file) return;
+  try {
+    const parsed = normalizeSetup(JSON.parse(await file.text()));
+    if (!Object.keys(parsed.placements).length && !parsed.geometries.length && !parsed.camera) {
+      throw new Error("empty");
+    }
+    state.setup = parsed;
+    state.saved = clone(parsed);
+    state.usingDraft = true;
+    cameraIsSaved = Boolean(parsed.camera);
+    writeDraft(parsed);
+    if (parsed.camera) applyCamera(parsed.camera);
+    rebuildGeometries();
+    renderFlags();
+    autoPlace();
+    applyAllPositions();
+    syncChrome();
+    syncEditor();
+    source?.restart();
+    toast(UI.imported);
+  } catch (error) {
+    console.error(error);
+    toast(UI.importInvalid);
+  }
+}
+
+function ensurePlacementsForData() {
+  if (!state.data || Object.keys(state.setup.placements).length) return;
+  for (const characteristic of state.data.characteristics) {
+    if (state.setup.placements[characteristic.id]) continue;
+    const point = asVec3(characteristic.defaultAnchor);
+    state.setup.placements[characteristic.id] = {
+      flag: null,
+      anchor: point ? { kind: "point", point } : null,
+    };
+  }
+}
+
+function characteristicFor(key) {
+  if (!state.data) return null;
+  const mapped = state.setup.controlMap?.[key];
+  const id = mapped || key;
+  return state.data.characteristics.find((item) => item.id === id) || null;
 }
 
 function windowOf(measurements) {
+  if (!measurements) return [];
   if (state.filter === "all") return measurements;
   const count = Number(state.filter);
   if (!Number.isFinite(count) || count <= 0) return measurements;
   return measurements.slice(-count);
 }
 
-function isOutOfTolerance(value, characteristic) {
-  return value > characteristic.usl || value < characteristic.lsl;
-}
-
 function renderFlags() {
   els.flags.replaceChildren();
-  for (const characteristic of state.data.characteristics) {
-    const article = document.createElement("article");
-    article.className = "flag";
-    article.dataset.id = characteristic.id;
-    const built = flagMarkup(characteristic);
-    article.classList.toggle("is-oot", built.outOfTolerance);
-    article.innerHTML = built.html;
-    els.flags.append(article);
+  for (const key of Object.keys(state.setup.placements)) {
+    els.flags.append(makeFlag(key));
   }
   markSelection();
 }
 
 function refreshFlagContents() {
-  for (const characteristic of state.data.characteristics) {
-    const article = els.flags.querySelector(`[data-id="${CSS.escape(characteristic.id)}"]`);
-    if (!article) continue;
-    const built = flagMarkup(characteristic);
-    article.classList.toggle("is-oot", built.outOfTolerance);
-    article.innerHTML = built.html;
+  for (const key of Object.keys(state.setup.placements)) {
+    let article = els.flags.querySelector(`[data-id="${CSS.escape(key)}"]`);
+    if (!article) {
+      article = makeFlag(key);
+      els.flags.append(article);
+    } else {
+      fillFlag(article, key);
+    }
   }
   markSelection();
+  applyAllPositions();
 }
 
-function flagMarkup(characteristic) {
-  const samples = windowOf(characteristic.measurements);
-  const last = samples[samples.length - 1];
-  const lastOut = last ? isOutOfTolerance(last.value, characteristic) : false;
+function makeFlag(key) {
+  const article = document.createElement("article");
+  article.className = "flag";
+  article.dataset.id = key;
+  fillFlag(article, key);
+  return article;
+}
 
-  if (!samples.length) {
-    return {
-      outOfTolerance: false,
-      html: `<h2 class="flag-name">${escapeHtml(characteristic.name)}</h2><p class="flag-meta">${UI.noValues}</p>`,
-    };
+function fillFlag(article, key) {
+  const characteristic = characteristicFor(key);
+  const template = state.setup.labelTemplate;
+  article.dataset.size = template.size;
+  if (!characteristic) {
+    article.classList.remove("is-oot");
+    article.dataset.n = "0";
+    article.innerHTML = `<h2 class="flag-name">${escapeHtml(key)}</h2><p class="flag-meta">Keine Istwerte. Im Vorbereiten einem Merkmal zuordnen.</p>`;
+    return;
   }
-
-  const mean = samples.reduce((sum, sample) => sum + sample.value, 0) / samples.length;
-  const outCount = samples.filter((sample) => isOutOfTolerance(sample.value, characteristic)).length;
-  const status = outCount === 0 ? UI.inTol : `${outCount} ${UI.outTol}`;
-  const unit = escapeHtml(characteristic.unit);
-
-  return {
-    outOfTolerance: lastOut,
-    html: `
-    <h2 class="flag-name">${escapeHtml(characteristic.name)}</h2>
-    <div class="flag-ist">
-      <span class="k">Ist</span>
-      <span class="v ${lastOut ? "oot" : "ok"}" title="${escapeHtml(last.pieceId)}">${fmt.format(last.value)}</span>
-      <span class="u">${unit}</span>
-    </div>
-    <p class="flag-limits">
-      <span>Nenn ${fmt.format(characteristic.nominal)}</span>
-      <span class="limit">USL ${fmt.format(characteristic.usl)}</span>
-      <span class="limit">LSL ${fmt.format(characteristic.lsl)}</span>
-    </p>
-    ${sparkline(characteristic, samples)}
-    <p class="legend" aria-hidden="true">
-      <span class="series"><i></i>Ist</span>
-      <span class="nominal"><i></i>Nenn</span>
-      <span class="mean"><i></i>Mittel</span>
-      <span class="limit"><i></i>USL/LSL</span>
-    </p>
-    <p class="flag-meta">n = ${samples.length} · Mittel ${fmt.format(mean)} · ${status}</p>
-  `,
-  };
-}
-
-function sparkline(characteristic, samples) {
-  const values = samples.map((sample) => sample.value);
-  const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
-  let min = Math.min(characteristic.lsl, characteristic.usl, characteristic.nominal, mean, ...values);
-  let max = Math.max(characteristic.lsl, characteristic.usl, characteristic.nominal, mean, ...values);
-  const pad = (max - min) * 0.16 || Math.abs(characteristic.nominal) * 0.01 || 0.001;
-  min -= pad;
-  max += pad;
-  const width = 200;
-  const height = 52;
-  const padL = 2;
-  const padR = 2;
-  const padT = 4;
-  const padB = 4;
-  const innerW = width - padL - padR;
-  const innerH = height - padT - padB;
-  const xAt = (index) =>
-    padL + (values.length === 1 ? innerW / 2 : (index / (values.length - 1)) * innerW);
-  const yAt = (value) => padT + (1 - (value - min) / (max - min)) * innerH;
-  const outCount = values.filter((value) => isOutOfTolerance(value, characteristic)).length;
-  const radius = values.length > 40 ? 1.5 : values.length > 20 ? 2.05 : 2.5;
-
-  const bandTop = Math.min(yAt(characteristic.usl), yAt(characteristic.lsl));
-  const bandHeight = Math.abs(yAt(characteristic.usl) - yAt(characteristic.lsl));
-  const span = max - min || 1;
-  const nearLimit = (value) =>
-    Math.abs(value - characteristic.usl) <= span * 0.012 || Math.abs(value - characteristic.lsl) <= span * 0.012;
-  const horizontal = (value, className) =>
-    `<line class="${className}" x1="${padL}" x2="${width - padR}" y1="${yAt(value).toFixed(2)}" y2="${yAt(value).toFixed(2)}" />`;
-  const nominalLine = nearLimit(characteristic.nominal) ? "" : horizontal(characteristic.nominal, "nominal");
-  const points = values
-    .map((value, index) => {
-      const out = isOutOfTolerance(value, characteristic);
-      const title = `${samples[index].pieceId}: ${fmt.format(value)} ${characteristic.unit}`;
-      return `<circle class="pt${out ? " oot" : ""}" cx="${xAt(index).toFixed(2)}" cy="${yAt(value).toFixed(2)}" r="${out ? radius + 1 : radius}"><title>${escapeHtml(title)}</title></circle>`;
-    })
-    .join("");
-  const series =
-    values.length > 1
-      ? `<polyline class="series" points="${values
-          .map((value, index) => `${xAt(index).toFixed(2)},${yAt(value).toFixed(2)}`)
-          .join(" ")}" />`
-      : "";
-  const label = `${characteristic.name}: ${values.length} Istwerte, ${outCount} außer Toleranz`;
-
-  return `
-    <svg class="spark" viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(label)}" data-n="${values.length}" data-oot="${outCount}">
-      <rect class="band" x="${padL}" y="${bandTop.toFixed(2)}" width="${innerW}" height="${Math.max(bandHeight, 0).toFixed(2)}"></rect>
-      ${horizontal(characteristic.usl, "limit")}
-      ${horizontal(characteristic.lsl, "limit")}
-      ${nominalLine}
-      ${horizontal(mean, "mean")}
-      ${series}
-      ${points}
-    </svg>
-  `;
+  const built = renderFlag(characteristic, windowOf(characteristic.measurements), template);
+  article.classList.toggle("is-oot", built.outOfTolerance);
+  article.dataset.n = String(built.count);
+  article.dataset.oot = String(built.outCount);
+  article.innerHTML = built.html;
 }
 
 function autoPlace() {
   const stageW = els.stage.clientWidth;
   const stageH = els.stage.clientHeight;
-  if (stageW < 40 || stageH < 40) return;
+  if (stageW < 40 || stageH < 40 || !state.setup) return;
   const pending = [];
-  state.data.characteristics.forEach((characteristic, index) => {
-    const placement = state.placements[characteristic.id];
-    if (placement?.flag?.pinned) return;
-    const element = els.flags.querySelector(`[data-id="${CSS.escape(characteristic.id)}"]`);
+  Object.keys(state.setup.placements).forEach((key, index) => {
+    const placement = state.setup.placements[key];
+    if (placement.flag?.pinned) return;
+    const element = els.flags.querySelector(`[data-id="${CSS.escape(key)}"]`);
     if (!element) return;
-    camera.updateMatrixWorld();
-    const projected = placement?.anchor ? projectToStage(placement.anchor, stageW, stageH) : null;
+    const world = anchorWorld(key);
+    const projected = world ? projectToStage(world, stageW, stageH) : null;
     pending.push({
-      id: characteristic.id,
+      key,
       width: element.offsetWidth || 200,
       height: element.offsetHeight || 140,
-      px: projected ? projected.x : stageW * ((index + 0.5) / state.data.characteristics.length),
+      px: projected ? projected.x : stageW * ((index + 0.5) / Math.max(1, Object.keys(state.setup.placements).length)),
       py: projected ? projected.y : stageH / 2,
     });
   });
   if (!pending.length) return;
-
   const mid = stageH / 2;
   let top = pending.filter((item) => item.py < mid).sort((a, b) => a.px - b.px);
   let bottom = pending.filter((item) => item.py >= mid).sort((a, b) => a.px - b.px);
@@ -701,61 +956,72 @@ function placeRow(items, side, stageW, stageH) {
   const slot = (stageW - margin * 2) / items.length;
   items.forEach((item, index) => {
     const x = margin + slot * index + Math.max(0, (slot - item.width) / 2);
-    state.placements[item.id].flag = {
-      x: x / stageW,
-      y: y / stageH,
-      pinned: false,
-    };
+    state.setup.placements[item.key].flag = { x: x / stageW, y: y / stageH, pinned: false };
   });
 }
 
 function applyAllPositions() {
   const stageW = els.stage.clientWidth;
   const stageH = els.stage.clientHeight;
-  if (!stageW || !stageH) return;
-  for (const characteristic of state.data.characteristics) {
-    const element = els.flags.querySelector(`[data-id="${CSS.escape(characteristic.id)}"]`);
-    const flag = state.placements[characteristic.id]?.flag;
-    if (!element || !flag) continue;
+  if (!stageW || !stageH || !state.setup) return;
+  for (const [key, placement] of Object.entries(state.setup.placements)) {
+    const element = els.flags.querySelector(`[data-id="${CSS.escape(key)}"]`);
+    if (!element || !placement.flag) continue;
     const maxX = Math.max(0, stageW - element.offsetWidth);
     const maxY = Math.max(0, stageH - 24);
-    const x = clamp(flag.x * stageW, 0, maxX);
-    const y = clamp(flag.y * stageH, 0, maxY);
-    element.style.left = `${x}px`;
-    element.style.top = `${y}px`;
+    element.style.left = `${clamp(placement.flag.x * stageW, 0, maxX)}px`;
+    element.style.top = `${clamp(placement.flag.y * stageH, 0, maxY)}px`;
   }
 }
 
-function syncLeaderNodes() {
-  for (const characteristic of state.data.characteristics) {
-    if (leaderNodes.has(characteristic.id)) continue;
-    const group = document.createElementNS(SVG_NS, "g");
-    group.dataset.id = characteristic.id;
-    const line = document.createElementNS(SVG_NS, "line");
-    const dot = document.createElementNS(SVG_NS, "circle");
-    dot.setAttribute("r", "4.5");
-    group.append(line, dot);
-    els.leaders.append(group);
-    leaderNodes.set(characteristic.id, { group, line, dot });
+function anchorWorld(key) {
+  const anchor = state.setup.placements[key]?.anchor;
+  if (!anchor) return null;
+  if (anchor.kind === "geometry") {
+    const geometry = state.setup.geometries.find((item) => item.id === anchor.geometryId);
+    if (!geometry) return null;
+    const attach = anchor.attach || geometry.attach || "center";
+    if (geometry.type === "circle" && attach === "nearest") return nearestOnCircle(geometry, key) || geometry.center;
+    if (geometry.type === "circle") return geometry.center;
+    if (geometry.corners?.length) {
+      const sum = geometry.corners.reduce((acc, point) => add(acc, point), { x: 0, y: 0, z: 0 });
+      return scale(sum, 1 / geometry.corners.length);
+    }
   }
+  return anchor.point || null;
+}
+
+function nearestOnCircle(geometry, key) {
+  const samples = sampleCircle(geometry.center, geometry.normal, geometry.radius, 64);
+  const element = els.flags.querySelector(`[data-id="${CSS.escape(key)}"]`);
+  if (!element) return geometry.center;
+  const stageRect = els.stage.getBoundingClientRect();
+  const rect = element.getBoundingClientRect();
+  const target = { x: rect.left - stageRect.left + rect.width / 2, y: rect.top - stageRect.top + rect.height / 2 };
+  let best = null;
+  let bestDist = Infinity;
+  for (const point of samples) {
+    const projected = projectToStage(point);
+    if (!projected) continue;
+    const dist = (projected.x - target.x) ** 2 + (projected.y - target.y) ** 2;
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = point;
+    }
+  }
+  return best;
 }
 
 function updateLeaders() {
-  if (!camera || !state.data) return;
+  if (!camera || !state.setup) return;
   camera.updateMatrixWorld();
   const stageRect = els.stage.getBoundingClientRect();
-  const stageW = stageRect.width;
-  const stageH = stageRect.height;
-  for (const characteristic of state.data.characteristics) {
-    const nodes = leaderNodes.get(characteristic.id);
-    if (!nodes) continue;
-    const placement = state.placements[characteristic.id];
-    const element = els.flags.querySelector(`[data-id="${CSS.escape(characteristic.id)}"]`);
-    const projected = placement?.anchor ? projectToStage(placement.anchor, stageW, stageH) : null;
-    if (!projected || !element) {
-      nodes.group.classList.add("is-hidden");
-      continue;
-    }
+  els.leaders.replaceChildren();
+  for (const key of Object.keys(state.setup.placements)) {
+    const world = anchorWorld(key);
+    const element = els.flags.querySelector(`[data-id="${CSS.escape(key)}"]`);
+    const projected = world ? projectToStage(world, stageRect.width, stageRect.height) : null;
+    if (!projected || !element) continue;
     const rect = element.getBoundingClientRect();
     const flagRect = {
       left: rect.left - stageRect.left,
@@ -763,20 +1029,52 @@ function updateLeaders() {
       width: rect.width,
       height: rect.height,
     };
-    if (flagRect.width < 2) {
-      nodes.group.classList.add("is-hidden");
-      continue;
-    }
+    if (flagRect.width < 2) continue;
     const end = borderPoint(flagRect, projected);
-    nodes.group.classList.remove("is-hidden");
-    nodes.group.classList.toggle("is-selected", state.edit && state.selectedId === characteristic.id);
-    nodes.line.setAttribute("x1", projected.x.toFixed(2));
-    nodes.line.setAttribute("y1", projected.y.toFixed(2));
-    nodes.line.setAttribute("x2", end.x.toFixed(2));
-    nodes.line.setAttribute("y2", end.y.toFixed(2));
-    nodes.dot.setAttribute("cx", projected.x.toFixed(2));
-    nodes.dot.setAttribute("cy", projected.y.toFixed(2));
+    const group = document.createElementNS(SVG_NS, "g");
+    const selected = state.edit && state.selectedId === key;
+    if (selected) group.classList.add("is-selected");
+    const line = document.createElementNS(SVG_NS, "line");
+    line.setAttribute("x1", projected.x.toFixed(2));
+    line.setAttribute("y1", projected.y.toFixed(2));
+    line.setAttribute("x2", end.x.toFixed(2));
+    line.setAttribute("y2", end.y.toFixed(2));
+    const anchor = state.setup.placements[key].anchor;
+    const geometry = anchor?.kind === "geometry" ? state.setup.geometries.find((item) => item.id === anchor.geometryId) : null;
+    if (geometry) line.setAttribute("stroke", geometry.color);
+    group.append(line);
+    if (anchor?.kind !== "geometry") {
+      group.append(makeHandle(projected.x, projected.y, { kind: "anchor", id: key, index: "0" }, geometry?.color || "#1b2330"));
+    }
+    els.leaders.append(group);
   }
+  if (!state.edit) return;
+  for (const geometry of state.setup.geometries) {
+    geometry.points.forEach((point, index) => {
+      const projected = projectToStage(point, stageRect.width, stageRect.height);
+      if (!projected) return;
+      els.leaders.append(makeHandle(projected.x, projected.y, { kind: "geopoint", id: geometry.id, index: String(index) }, geometry.color));
+    });
+  }
+  for (const [index, draft] of state.draftPoints.entries()) {
+    const projected = projectToStage(draft.point, stageRect.width, stageRect.height);
+    if (!projected) continue;
+    els.leaders.append(makeHandle(projected.x, projected.y, { kind: "draft", id: "draft", index: String(index) }, "#f0b429"));
+  }
+}
+
+function makeHandle(x, y, data, color) {
+  const dot = document.createElementNS(SVG_NS, "circle");
+  dot.setAttribute("class", "handle");
+  dot.setAttribute("cx", x.toFixed(2));
+  dot.setAttribute("cy", y.toFixed(2));
+  dot.setAttribute("r", "7");
+  dot.setAttribute("fill", "#fff");
+  dot.setAttribute("stroke", color);
+  dot.dataset.kind = data.kind;
+  dot.dataset.id = data.id;
+  dot.dataset.index = data.index;
+  return dot;
 }
 
 function borderPoint(rect, target) {
@@ -787,8 +1085,8 @@ function borderPoint(rect, target) {
   if (dx === 0 && dy === 0) return { x: cx, y: cy };
   const scaleX = dx !== 0 ? rect.width / 2 / Math.abs(dx) : Infinity;
   const scaleY = dy !== 0 ? rect.height / 2 / Math.abs(dy) : Infinity;
-  const scale = Math.min(scaleX, scaleY);
-  return { x: cx + dx * scale, y: cy + dy * scale };
+  const factor = Math.min(scaleX, scaleY);
+  return { x: cx + dx * factor, y: cy + dy * factor };
 }
 
 function onFlagPointerDown(event) {
@@ -798,40 +1096,67 @@ function onFlagPointerDown(event) {
   event.preventDefault();
   event.stopPropagation();
   state.selectedId = article.dataset.id;
+  state.selectedGeometryId = state.setup.placements[state.selectedId]?.anchor?.geometryId || null;
   markSelection();
+  syncEditor();
   updateHint();
-  updateLeaders();
-
   const startRect = article.getBoundingClientRect();
   const offsetX = event.clientX - startRect.left;
   const offsetY = event.clientY - startRect.top;
   article.setPointerCapture(event.pointerId);
-
   const move = (ev) => {
     const stageRect = els.stage.getBoundingClientRect();
-    const maxX = Math.max(0, stageRect.width - article.offsetWidth);
-    const maxY = Math.max(0, stageRect.height - 24);
-    const x = clamp(ev.clientX - stageRect.left - offsetX, 0, maxX);
-    const y = clamp(ev.clientY - stageRect.top - offsetY, 0, maxY);
+    const x = clamp(ev.clientX - stageRect.left - offsetX, 0, Math.max(0, stageRect.width - article.offsetWidth));
+    const y = clamp(ev.clientY - stageRect.top - offsetY, 0, Math.max(0, stageRect.height - 24));
     article.style.left = `${x}px`;
     article.style.top = `${y}px`;
-    const placement = state.placements[article.dataset.id];
-    placement.flag = {
-      x: x / stageRect.width,
-      y: y / stageRect.height,
-      pinned: true,
-    };
+    state.setup.placements[article.dataset.id].flag = { x: x / stageRect.width, y: y / stageRect.height, pinned: true };
   };
   const up = () => {
     article.removeEventListener("pointermove", move);
     article.removeEventListener("pointerup", up);
     article.removeEventListener("pointercancel", up);
-    pinAll();
-    saveLocal();
   };
   article.addEventListener("pointermove", move);
   article.addEventListener("pointerup", up);
   article.addEventListener("pointercancel", up);
+}
+
+function onHandlePointerDown(event) {
+  const handle = event.target.closest?.(".handle");
+  if (!state.edit || !handle || event.button !== 0 || handle.dataset.kind === "draft") return;
+  event.preventDefault();
+  event.stopPropagation();
+  controls.enabled = false;
+  handleDrag = { kind: handle.dataset.kind, id: handle.dataset.id, index: Number(handle.dataset.index) };
+  if (handleDrag.kind === "anchor") state.selectedId = handleDrag.id;
+  if (handleDrag.kind === "geopoint") state.selectedGeometryId = handleDrag.id;
+  markSelection();
+  syncEditor();
+  const move = (ev) => {
+    const hit = pickSurface(ev);
+    if (!hit) return;
+    if (handleDrag.kind === "anchor") {
+      const placement = state.setup.placements[handleDrag.id];
+      if (placement) placement.anchor = { kind: "point", point: hit.point };
+    } else {
+      const geometry = state.setup.geometries.find((item) => item.id === handleDrag.id);
+      if (!geometry || !geometry.points[handleDrag.index]) return;
+      geometry.points[handleDrag.index] = hit.point;
+      if (geometry.mode === "center" && handleDrag.index === 0) geometry.normal = hit.normal;
+      recomputeGeometry(geometry);
+      rebuildGeometries();
+    }
+    updateLeaders();
+  };
+  const up = () => {
+    controls.enabled = true;
+    handleDrag = null;
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", up);
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", up);
 }
 
 function onViewPointerDown(event) {
@@ -848,149 +1173,337 @@ function onViewPointerUp(event) {
   const dy = event.clientY - pointerDown.y;
   pointerDown = null;
   if (!state.edit || dx * dx + dy * dy > 36) return;
-  if (!state.selectedId) {
-    toast(UI.pickFirst);
-    return;
-  }
   const hit = pickSurface(event);
   if (!hit) {
     toast(UI.pickMiss);
     return;
   }
-  state.placements[state.selectedId].anchor = hit;
-  saveLocal();
+  onSurfaceClick(hit);
+}
+
+function onSurfaceClick(hit) {
+  if (state.tool === "point") {
+    if (!state.selectedId) {
+      toast(UI.pickFirst);
+      return;
+    }
+    const placement = state.setup.placements[state.selectedId] || (state.setup.placements[state.selectedId] = {});
+    placement.anchor = { kind: "point", point: hit.point };
+    toast(UI.anchorSet);
+    updateLeaders();
+    return;
+  }
+  state.draftPoints.push(hit);
+  const need = state.tool === "circle2" ? 2 : 3;
+  if (state.draftPoints.length < need) {
+    toast(`Punkt ${state.draftPoints.length} von ${need}`);
+    updateLeaders();
+    return;
+  }
+  const geometry = geometryFromDraft();
+  state.draftPoints = [];
+  if (!geometry) {
+    toast(UI.geoBad);
+    updateLeaders();
+    return;
+  }
+  state.setup.geometries.push(geometry);
+  state.selectedGeometryId = geometry.id;
+  if (state.selectedId) {
+    const placement = state.setup.placements[state.selectedId] || (state.setup.placements[state.selectedId] = {});
+    placement.anchor = { kind: "geometry", geometryId: geometry.id, attach: geometry.attach };
+  }
+  rebuildGeometries();
+  syncEditor();
+  toast(UI.geoMade);
+}
+
+function geometryFromDraft() {
+  const points = state.draftPoints.map((hit) => hit.point);
+  const color = nextColor();
+  const base = {
+    id: `geo-${Date.now().toString(36)}-${state.setup.geometries.length}`,
+    color,
+    lineWidth: 2.5,
+    opacity: 0.9,
+    attach: "center",
+    points,
+  };
+  if (state.tool === "circle3") {
+    const circle = circleFromThreePoints(points[0], points[1], points[2]);
+    if (!circle) return null;
+    return { ...base, type: "circle", mode: "3", ...circle };
+  }
+  if (state.tool === "circle2") {
+    const circle = circleFromCenterAndEdge(points[0], points[1], state.draftPoints[0].normal);
+    if (!circle) return null;
+    return { ...base, type: "circle", mode: "center", normal: circle.normal, ...circle };
+  }
+  const rect = rectangleFromThreePoints(points[0], points[1], points[2]);
+  if (!rect) return null;
+  return { ...base, type: "rect", mode: "rect", normal: rect.normal, corners: rect.corners };
+}
+
+function nextColor() {
+  const used = new Set(state.setup.geometries.map((geometry) => geometry.color));
+  return GEOMETRY_PALETTE.find((color) => !used.has(color)) || GEOMETRY_PALETTE[state.setup.geometries.length % GEOMETRY_PALETTE.length];
+}
+
+function recomputeGeometry(geometry) {
+  if (geometry.type === "circle" && geometry.mode === "center" && geometry.points.length >= 2) {
+    const circle = circleFromCenterAndEdge(geometry.points[0], geometry.points[1], geometry.normal || { x: 0, y: 1, z: 0 });
+    if (!circle) return;
+    geometry.center = circle.center;
+    geometry.normal = circle.normal;
+    geometry.radius = circle.radius;
+    return;
+  }
+  if (geometry.type === "circle" && geometry.points.length >= 3) {
+    const circle = circleFromThreePoints(geometry.points[0], geometry.points[1], geometry.points[2]);
+    if (!circle) return;
+    geometry.center = circle.center;
+    geometry.normal = circle.normal;
+    geometry.radius = circle.radius;
+    return;
+  }
+  if (geometry.type === "rect" && geometry.points.length >= 3) {
+    const rect = rectangleFromThreePoints(geometry.points[0], geometry.points[1], geometry.points[2]);
+    if (!rect) return;
+    geometry.corners = rect.corners;
+    geometry.normal = rect.normal;
+  }
+}
+
+function rebuildGeometries() {
+  if (!geometryRoot) return;
+  for (const group of geometryGroups.values()) geometryRoot.remove(group);
+  geometryGroups.clear();
+  for (const geometry of state.setup?.geometries || []) {
+    const group = new THREE.Group();
+    group.renderOrder = 2;
+    const lift = geometry.normal ? scale(normalize(geometry.normal) || geometry.normal, 0.4) : { x: 0, y: 0, z: 0 };
+    if (geometry.type === "circle" && geometry.center && geometry.radius) {
+      group.add(circleMesh(add(geometry.center, lift), geometry.normal, geometry.radius, geometry));
+    }
+    if (geometry.type === "rect" && geometry.corners?.length === 4) {
+      group.add(rectMesh(geometry.corners.map((point) => add(point, lift)), geometry));
+    }
+    geometryRoot.add(group);
+    geometryGroups.set(geometry.id, group);
+  }
+}
+
+function circleMesh(center, normal, radius, geometry) {
+  const basis = basisFromNormal(normal);
+  const group = new THREE.Group();
+  if (!basis) return group;
+  const segments = 96;
+  const thickness = Math.max(0.45, geometry.lineWidth * 0.55);
+  const positions = [];
+  const indices = [];
+  for (let i = 0; i <= segments; i += 1) {
+    const t = (i / segments) * Math.PI * 2;
+    const dir = add(scale(basis.u, Math.cos(t)), scale(basis.v, Math.sin(t)));
+    const inner = add(center, scale(dir, Math.max(0.05, radius - thickness / 2)));
+    const outer = add(center, scale(dir, radius + thickness / 2));
+    positions.push(inner.x, inner.y, inner.z, outer.x, outer.y, outer.z);
+    if (i < segments) {
+      const a = i * 2;
+      indices.push(a, a + 1, a + 2, a + 1, a + 3, a + 2);
+    }
+  }
+  group.add(meshFrom(positions, indices, geometry.color, geometry.opacity, true));
+  const fillPositions = [center.x, center.y, center.z];
+  const fillIndices = [];
+  for (let i = 0; i <= segments; i += 1) {
+    const t = (i / segments) * Math.PI * 2;
+    const dir = add(scale(basis.u, Math.cos(t)), scale(basis.v, Math.sin(t)));
+    const point = add(center, scale(dir, radius));
+    fillPositions.push(point.x, point.y, point.z);
+    if (i < segments) fillIndices.push(0, i + 1, i + 2);
+  }
+  group.add(meshFrom(fillPositions, fillIndices, geometry.color, geometry.opacity * 0.22, false));
+  return group;
+}
+
+function rectMesh(corners, geometry) {
+  const group = new THREE.Group();
+  const [a, b, c, d] = corners;
+  const positions = [a, b, c, a, c, d].flatMap((point) => [point.x, point.y, point.z]);
+  const indices = [0, 1, 2, 3, 4, 5];
+  group.add(meshFrom(positions, indices, geometry.color, geometry.opacity * 0.28, false));
+  const loop = [a, b, b, c, c, d, d, a];
+  const linePositions = [];
+  const lineIndices = [];
+  const thickness = Math.max(0.35, geometry.lineWidth * 0.4);
+  const normal = geometry.normal || { x: 0, y: 1, z: 0 };
+  for (let i = 0; i < loop.length; i += 2) {
+    const start = loop[i];
+    const end = loop[i + 1];
+    const dir = normalize({ x: end.x - start.x, y: end.y - start.y, z: end.z - start.z });
+    if (!dir) continue;
+    const side = scale(normalize(cross(dir, normal)) || { x: 1, y: 0, z: 0 }, thickness / 2);
+    const base = linePositions.length / 3;
+    for (const point of [add(start, side), add(start, scale(side, -1)), add(end, side), add(end, scale(side, -1))]) {
+      linePositions.push(point.x, point.y, point.z);
+    }
+    lineIndices.push(base, base + 1, base + 2, base + 1, base + 3, base + 2);
+  }
+  group.add(meshFrom(linePositions, lineIndices, geometry.color, geometry.opacity, true));
+  return group;
+}
+
+function cross(a, b) {
+  return { x: a.y * b.z - a.z * b.y, y: a.z * b.x - a.x * b.z, z: a.x * b.y - a.y * b.x };
+}
+
+function meshFrom(positions, indices, color, opacity, polygonOffset) {
+  const buffer = new THREE.BufferGeometry();
+  buffer.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  buffer.setIndex(indices);
+  buffer.computeVertexNormals();
+  const material = new THREE.MeshBasicMaterial({
+    color,
+    transparent: true,
+    opacity,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+    polygonOffset: polygonOffset,
+    polygonOffsetFactor: -2,
+    polygonOffsetUnits: -2,
+  });
+  const mesh = new THREE.Mesh(buffer, material);
+  mesh.renderOrder = 2;
+  return mesh;
+}
+
+function updateSelectedGeometry(patch) {
+  const geometry = state.setup.geometries.find((item) => item.id === state.selectedGeometryId);
+  if (!geometry) return;
+  Object.assign(geometry, patch);
+  const anchor = state.setup.placements[state.selectedId]?.anchor;
+  if (anchor?.geometryId === geometry.id && patch.attach) anchor.attach = patch.attach;
+  rebuildGeometries();
   updateLeaders();
-  toast(UI.anchorSet);
+}
+
+function deleteSelectedGeometry() {
+  const id = state.selectedGeometryId;
+  if (!id) return;
+  state.setup.geometries = state.setup.geometries.filter((geometry) => geometry.id !== id);
+  for (const placement of Object.values(state.setup.placements)) {
+    if (placement.anchor?.geometryId === id) placement.anchor = null;
+  }
+  state.selectedGeometryId = null;
+  rebuildGeometries();
+  syncEditor();
+  updateLeaders();
 }
 
 function pickSurface(event) {
   const rect = els.view.getBoundingClientRect();
-  if (!rect.width || !rect.height) return null;
+  if (!rect.width || !rect.height || !state.model) return null;
   pointerNdc.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
   pointerNdc.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
   camera.updateMatrixWorld();
   raycaster.setFromCamera(pointerNdc, camera);
   const hits = raycaster.intersectObject(state.model, true);
   if (!hits.length) return null;
-  const point = hits[0].point;
-  return { x: point.x, y: point.y, z: point.z };
+  const hit = hits[0];
+  let normal = { x: 0, y: 1, z: 0 };
+  if (hit.face?.normal) {
+    const world = hit.face.normal.clone().transformDirection(hit.object.matrixWorld).normalize();
+    normal = { x: world.x, y: world.y, z: world.z };
+  }
+  return { point: { x: hit.point.x, y: hit.point.y, z: hit.point.z }, normal };
 }
 
-function pinAll() {
-  for (const characteristic of state.data.characteristics) {
-    const flag = state.placements[characteristic.id]?.flag;
-    if (flag) flag.pinned = true;
+function syncChrome() {
+  const live = state.dataMode === "live";
+  els.dataBadge.textContent = live ? "Live" : "Beispieldaten";
+  els.dataBadge.classList.toggle("is-live", live);
+  els.setupBadge.hidden = false;
+  els.setupBadge.textContent = state.usingDraft ? "Lokaler Entwurf" : "Veröffentlichte Ansicht";
+  els.setupBadge.classList.toggle("is-draft", state.usingDraft);
+  els.setupBadge.classList.toggle("is-published", !state.usingDraft);
+  els.setupBadge.title = state.usingDraft
+    ? "Diese Ansicht liegt nur in diesem Browser. Export ersetzen und data/layout.json veroeffentlichen, damit alle sie sehen."
+    : "Ansicht aus data/layout.json. Vorbereiten und Abschliessen speichert einen Entwurf nur auf diesem Rechner.";
+  if (state.data?.part?.name) els.partName.textContent = state.data.part.name;
+  els.prepare.hidden = state.edit;
+  els.finish.hidden = !state.edit;
+  els.discard.hidden = !state.edit;
+  els.prepare.setAttribute("aria-pressed", String(state.edit));
+  if (state.setup && document.activeElement !== els.refreshSeconds) {
+    els.refreshSeconds.value = String(state.setup.refreshSeconds || 60);
   }
 }
 
-function setEdit(on) {
-  state.edit = on;
-  if (!on) state.selectedId = null;
-  document.body.classList.toggle("is-editing", on);
-  els.modeView.setAttribute("aria-pressed", String(!on));
-  els.modeEdit.setAttribute("aria-pressed", String(on));
-  markSelection();
-  updateHint();
-  updateLeaders();
+function syncEditor() {
+  if (!state.edit || !state.data) return;
+  const keys = Object.keys(state.setup.placements);
+  const previous = state.selectedId;
+  els.charSelect.replaceChildren();
+  for (const key of keys) {
+    const option = document.createElement("option");
+    option.value = key;
+    const characteristic = characteristicFor(key);
+    option.textContent = characteristic?.name || key;
+    els.charSelect.append(option);
+  }
+  if (previous && keys.includes(previous)) els.charSelect.value = previous;
+  else state.selectedId = els.charSelect.value || null;
+  els.charList.replaceChildren();
+  for (const characteristic of state.data.characteristics) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.dataset.char = characteristic.id;
+    const feature = state.data.features.find((item) => item.name === characteristic.objectName);
+    button.textContent = feature?.type ? `${characteristic.name} (${feature.type})` : characteristic.name;
+    els.charList.append(button);
+  }
+  const geometry = state.setup.geometries.find((item) => item.id === state.selectedGeometryId);
+  els.geoPanel.hidden = !geometry;
+  if (geometry) {
+    els.geoColor.value = geometry.color;
+    els.geoWidth.value = String(geometry.lineWidth);
+    els.geoOpacity.value = String(geometry.opacity);
+    els.geoAttach.value = geometry.attach || "center";
+  }
+  writeTemplateForm();
+}
+
+function writeTemplateForm() {
+  const template = state.setup.labelTemplate;
+  for (const input of els.templateForm.querySelectorAll("[data-key]")) {
+    const key = input.dataset.key;
+    if (input.type === "checkbox") input.checked = Boolean(template[key]);
+    else if (document.activeElement !== input) input.value = String(template[key]);
+  }
+}
+
+function readTemplateForm() {
+  const template = { ...state.setup.labelTemplate };
+  for (const input of els.templateForm.querySelectorAll("[data-key]")) {
+    const key = input.dataset.key;
+    if (input.type === "checkbox") template[key] = input.checked;
+    else if (key === "decimals") template[key] = Number(input.value);
+    else template[key] = input.value;
+  }
+  state.setup.labelTemplate = normalizeTemplate(template);
+  refreshFlagContents();
+  if (!cameraIsSaved) autoPlace();
+  applyAllPositions();
 }
 
 function markSelection() {
   for (const article of els.flags.querySelectorAll(".flag")) {
-    const selected = state.edit && article.dataset.id === state.selectedId;
-    article.classList.toggle("is-selected", selected);
+    article.classList.toggle("is-selected", state.edit && article.dataset.id === state.selectedId);
   }
 }
 
 function updateHint() {
-  if (!state.edit) {
-    els.hint.hidden = true;
-    return;
-  }
-  const characteristic = state.data.characteristics.find((item) => item.id === state.selectedId);
-  const which = characteristic ? `Ausgewählt: ${characteristic.name}. ` : "";
-  els.hint.hidden = false;
-  els.hint.textContent = which + UI.hintIdle;
-}
-
-function exportLayout() {
-  const payload = currentLayout();
-  for (const entry of Object.values(payload.placements)) {
-    if (entry.flag) entry.flag.pinned = true;
-  }
-  const blob = new Blob([JSON.stringify(payload, null, 2) + "\n"], { type: "application/json" });
-  const link = document.createElement("a");
-  const url = URL.createObjectURL(blob);
-  link.href = url;
-  link.download = "merkmale-layout.json";
-  document.body.append(link);
-  link.click();
-  link.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1500);
-  toast(UI.exported);
-}
-
-async function onImportFile() {
-  const file = els.importFile.files?.[0];
-  els.importFile.value = "";
-  if (!file) return;
-  try {
-    const parsed = JSON.parse(await file.text());
-    applyImported(parsed);
-    toast(UI.imported);
-  } catch (error) {
-    console.error(error);
-    toast(UI.importInvalid);
-  }
-}
-
-function applyImported(raw) {
-  if (!raw || typeof raw !== "object" || !raw.placements || typeof raw.placements !== "object") {
-    throw new Error("invalid layout");
-  }
-  let applied = 0;
-  for (const characteristic of state.data.characteristics) {
-    const clean = sanitizePlacement(raw.placements[characteristic.id]);
-    if (!clean) continue;
-    const current = state.placements[characteristic.id];
-    if (clean.anchor) current.anchor = clean.anchor;
-    if (clean.flag) current.flag = { ...clean.flag, pinned: clean.flag.pinned !== false };
-    applied += 1;
-  }
-  if (!applied) throw new Error("no matching characteristics");
-  saveLocal();
-  refreshFlagContents();
-  autoPlace();
-  applyAllPositions();
-  updateLeaders();
-}
-
-function onResetClick() {
-  if (els.resetBtn.dataset.armed !== "true") {
-    els.resetBtn.dataset.armed = "true";
-    els.resetBtn.textContent = "Sicher?";
-    clearTimeout(resetTimer);
-    resetTimer = setTimeout(() => {
-      els.resetBtn.dataset.armed = "false";
-      els.resetBtn.textContent = "Zurücksetzen";
-    }, 3500);
-    return;
-  }
-  clearTimeout(resetTimer);
-  els.resetBtn.dataset.armed = "false";
-  els.resetBtn.textContent = "Zurücksetzen";
-  try {
-    localStorage.removeItem(LAYOUT_KEY);
-  } catch {
-    /* ignore */
-  }
-  state.selectedId = null;
-  initPlacements();
-  refreshFlagContents();
-  autoPlace();
-  applyAllPositions();
-  markSelection();
-  updateLeaders();
-  toast(UI.reset);
+  els.hint.hidden = true;
 }
 
 function toast(message) {
@@ -999,7 +1512,7 @@ function toast(message) {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => {
     els.toast.hidden = true;
-  }, 2400);
+  }, 2800);
 }
 
 function fail(message) {
@@ -1011,14 +1524,12 @@ function fail(message) {
   document.body.dataset.error = message;
 }
 
-async function fetchJson(url) {
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`${response.status} ${url}`);
-  return response.json();
+function clone(value) {
+  return JSON.parse(JSON.stringify(value));
 }
 
-function clamp(value, min, max) {
-  return Math.min(max, Math.max(min, value));
+function roundVec(value) {
+  return { x: round(value.x, 3), y: round(value.y, 3), z: round(value.z, 3) };
 }
 
 function round(value, digits) {
@@ -1026,19 +1537,14 @@ function round(value, digits) {
   return Math.round(value * factor) / factor;
 }
 
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function isFiniteNumber(value) {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
 function escapeHtml(value) {
-  return String(value).replace(/[&<>"']/g, (char) => {
-    switch (char) {
-      case "&":
-        return "&amp;";
-      case "<":
-        return "&lt;";
-      case ">":
-        return "&gt;";
-      case '"':
-        return "&quot;";
-      default:
-        return "&#39;";
-    }
-  });
+  return String(value).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
 }
