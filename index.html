@@ -51,11 +51,25 @@
             Auf der Fläche
             <select id="tool">
               <option value="point">Fußpunkt</option>
-              <option value="circle3">Kreis durch 3 Punkte</option>
-              <option value="circle2">Kreis Mitte + Rand</option>
-              <option value="rect">Rechteckfläche</option>
+              <option value="Auto">Auto</option>
+              <option value="Linie">Linie</option>
+              <option value="Ebene">Ebene</option>
+              <option value="Kreis">Kreis</option>
+              <option value="Langloch">Langloch</option>
+              <option value="Zylinder">Zylinder</option>
+              <option value="Kegel">Kegel</option>
+              <option value="Kugel">Kugel</option>
             </select>
           </label>
+          <label>
+            Auswahl-Toleranz <span id="grow-label">18 Grad</span>
+            <input id="grow-angle" type="range" min="5" max="40" step="1" value="18" />
+          </label>
+          <div id="fit-preview" hidden>
+            <p id="fit-summary" class="note"></p>
+            <button type="button" id="fit-ok">Uebernehmen</button>
+            <button type="button" id="fit-cancel">Verwerfen</button>
+          </div>
           <h2>Fähnchen</h2>
           <label>
             Ausgewählt
