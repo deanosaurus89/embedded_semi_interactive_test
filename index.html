@@ -46,12 +46,11 @@
       <div id="workspace">
         <aside id="editor" hidden>
           <p class="note">Abschließen speichert Kamera, Geometrien, Fußpunkte, Fähnchen und die Beschriftung nur in diesem Browser (Lokaler Entwurf). Exportieren und <code>data/layout.json</code> ersetzen, damit alle die Ansicht sehen.</p>
-          <h2>Werkzeug</h2>
+          <h2>Zuordnung</h2>
           <label>
-            Auf der Fläche
+            Art
             <select id="tool">
-              <option value="point">Fußpunkt</option>
-              <option value="Auto">Auto</option>
+              <option value="point">Punkt</option>
               <option value="Linie">Linie</option>
               <option value="Ebene">Ebene</option>
               <option value="Kreis">Kreis</option>
@@ -61,35 +60,17 @@
               <option value="Kugel">Kugel</option>
             </select>
           </label>
-          <label>
-            Methode
-            <select id="method">
-              <option value="patch">Fläche</option>
-              <option value="brush">Pinsel</option>
-            </select>
-          </label>
-          <div id="patch-tools">
-            <label>
-              Auswahl-Toleranz <span id="grow-label">18 Grad</span>
-              <input id="grow-angle" type="range" min="5" max="40" step="1" value="18" />
-            </label>
-          </div>
-          <div id="brush-tools" hidden>
-            <label>
-              Pinselradius <span id="brush-label">3 mm</span>
-              <input id="brush-radius" type="range" min="0.5" max="30" step="0.5" value="3" />
-            </label>
-            <label class="checkline"><input id="brush-erase" type="checkbox" /> Radieren (oder Umschalt)</label>
-            <div class="geo-grid">
-              <button type="button" id="brush-undo">Rückgängig</button>
-              <button type="button" id="brush-clear">Auswahl leeren</button>
-            </div>
-            <p class="note">Linke Maustaste malt. Rechte Maustaste dreht, mittlere zoomt.</p>
-          </div>
+          <label class="checkline"><input id="snap" type="checkbox" checked /> Knoten fangen</label>
+          <p id="pick-status" class="note">Ein Klick setzt den Fußpunkt.</p>
+          <p class="note">Linksklick setzt einen Punkt. Rechts drehen, Mitte zoomen.</p>
           <div id="fit-preview" hidden>
             <p id="fit-summary" class="note"></p>
-            <button type="button" id="fit-ok">Uebernehmen</button>
-            <button type="button" id="fit-cancel">Verwerfen</button>
+            <div class="geo-grid">
+              <button type="button" id="fit-ok">Uebernehmen</button>
+              <button type="button" id="fit-more">Weiterer Punkt</button>
+              <button type="button" id="fit-undo">Letzten Punkt entfernen</button>
+              <button type="button" id="fit-cancel">Abbrechen</button>
+            </div>
           </div>
           <h2>Fähnchen</h2>
           <label>

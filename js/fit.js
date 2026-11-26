@@ -162,7 +162,7 @@ function stats(residual) {
 }
 
 export function fitPlane(points, normalHint) {
-  if (points.length < 3) throw new Error("Ebene braucht mindestens 3 Punkte, bitte mehr Fläche anmalen.");
+  if (points.length < 3) throw new Error("Ebene braucht mindestens 3 Punkte.");
   const center = centroid(points);
   let normal = eigSym3(scatter(points, center)).vectors[0];
   if (normalHint && dot(normal, normalHint) < 0) normal = scale(normal, -1);
@@ -171,8 +171,22 @@ export function fitPlane(points, normalHint) {
   return { type: "Ebene", center, normal, residuals: residual, ...stats(residual) };
 }
 
+export function constructLine(points) {
+  if (points.length < 2) throw new Error("Linie braucht 2 Punkte: Anfang und Ende.");
+  const start = points[0];
+  const end = points[points.length - 1];
+  const delta = sub(end, start);
+  const length = norm(delta);
+  if (length < 1e-6) throw new Error("Linie: die beiden Punkte liegen aufeinander.");
+  const direction = canonical(unit(delta));
+  const center = add(start, scale(unit(delta), length / 2));
+  const residual = new Float64Array(points.length);
+  return { type: "Linie", center, normal: direction, direction, length, start, residuals: residual, ...stats(residual) };
+}
+
 export function fitLine(points, plane) {
-  if (points.length < 2) throw new Error("Linie braucht mindestens 2 Punkte, bitte mehr Fläche anmalen.");
+  if (points.length < 2) throw new Error("Linie braucht mindestens 2 Punkte.");
+  if (!plane && points.length === 2) return constructLine(points);
   const projected = plane
     ? points.map((q) => sub(q, scale(plane.normal, dot(sub(q, plane.center), plane.normal))))
     : points;
@@ -196,7 +210,20 @@ export function fitLine(points, plane) {
   return { type: "Linie", center, normal: direction, direction, length: hi - lo, residuals: residual, ...stats(residual) };
 }
 
-export function fitCircle2D(xy) {
+export function circumcircle2D(xy) {
+  const [a, b, c] = xy;
+  const d = 2 * (a[0] * (b[1] - c[1]) + b[0] * (c[1] - a[1]) + c[0] * (a[1] - b[1]));
+  if (Math.abs(d) < 1e-9) throw new Error("Kreis: die Punkte liegen auf einer Linie.");
+  const a2 = a[0] * a[0] + a[1] * a[1];
+  const b2 = b[0] * b[0] + b[1] * b[1];
+  const c2 = c[0] * c[0] + c[1] * c[1];
+  const cx = (a2 * (b[1] - c[1]) + b2 * (c[1] - a[1]) + c2 * (a[1] - b[1])) / d;
+  const cy = (a2 * (c[0] - b[0]) + b2 * (a[0] - c[0]) + c2 * (b[0] - a[0])) / d;
+  return { cx, cy, r: Math.hypot(a[0] - cx, a[1] - cy) };
+}
+
+export function fitCircle2D(xy, algebraicOnly = false) {
+  if (xy.length === 3) return circumcircle2D(xy);
   let sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0, sz = 0, sxz = 0, syz = 0;
   const n = xy.length;
   for (const [x, y] of xy) {
@@ -208,6 +235,7 @@ export function fitCircle2D(xy) {
     [2 * sxz, 2 * syz, sz],
   ) ?? [0, 0, 0];
   const r0 = Math.sqrt(Math.max(solved[2] + solved[0] ** 2 + solved[1] ** 2, 1e-12));
+  if (algebraicOnly) return { cx: solved[0], cy: solved[1], r: r0 };
   const out = levenbergMarquardt((q, o) => {
     for (let i = 0; i < n; i += 1) o[i] = Math.hypot(xy[i][0] - q[0], xy[i][1] - q[1]) - q[2];
   }, [solved[0], solved[1], r0], n);
@@ -215,7 +243,7 @@ export function fitCircle2D(xy) {
 }
 
 export function fitCircle3D(points, normal) {
-  if (points.length < 3) throw new Error("Kreis braucht mindestens 3 Punkte, bitte mehr Fläche anmalen.");
+  if (points.length < 3) throw new Error("Kreis braucht mindestens 3 Punkte.");
   const n = normal ? unit(normal) : fitPlane(points).normal;
   const c = centroid(points);
   const [u, v] = basis(n);
@@ -228,7 +256,7 @@ export function fitCircle3D(points, normal) {
 }
 
 export function fitSphere(points) {
-  if (points.length < 4) throw new Error("Kugel braucht mindestens 4 Punkte, bitte mehr Fläche anmalen.");
+  if (points.length < 4) throw new Error("Kugel braucht mindestens 4 Punkte.");
   const A = [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
   const b = [0, 0, 0, 0];
   for (const q of points) {
@@ -242,6 +270,12 @@ export function fitSphere(points) {
   const s = solveSmall(A, b) ?? [0, 0, 0, 1];
   const c0 = [s[0], s[1], s[2]];
   const r0 = Math.sqrt(Math.max(s[3] + dot(c0, c0), 1e-12));
+  if (points.length === 4) {
+    const residual = new Float64Array(points.length);
+    points.forEach((q, i) => { residual[i] = Math.hypot(q[0] - c0[0], q[1] - c0[1], q[2] - c0[2]) - r0; });
+    const normal = unit(sub(centroid(points), c0));
+    return { type: "Kugel", center: c0, normal: norm(normal) > 0 ? normal : [0, 0, 1], radius: r0, diameter: 2 * r0, residuals: residual, ...stats(residual) };
+  }
   const fn = (x, o) => {
     for (let i = 0; i < points.length; i += 1) o[i] = Math.hypot(points[i][0] - x[0], points[i][1] - x[1], points[i][2] - x[2]) - x[3];
   };
@@ -270,40 +304,119 @@ export function canonical(d) {
   return d[i] < 0 ? scale(d, -1) : d;
 }
 
+export function constructCylinder(points) {
+  if (points.length < 4) throw new Error("Zylinder braucht 4 Punkte: drei auf einem Kreis, einer in der Tiefe.");
+  const circle = fitCircle3D(points.slice(0, 3));
+  const origin = circle.center;
+  const far = points[points.length - 1];
+  const signed = dot(sub(far, origin), circle.normal);
+  if (Math.abs(signed) < 1e-4) throw new Error("Zylinder: Punkt 4 liegt in der Kreisebene.");
+  const dir = signed >= 0 ? circle.normal : scale(circle.normal, -1);
+  const length = Math.abs(signed);
+  const residual = new Float64Array(points.length);
+  points.forEach((q, i) => {
+    const w = sub(q, origin);
+    const t = dot(w, dir);
+    residual[i] = Math.hypot(w[0] - t * dir[0], w[1] - t * dir[1], w[2] - t * dir[2]) - circle.radius;
+  });
+  return {
+    type: "Zylinder",
+    center: add(origin, scale(dir, length / 2)),
+    start: origin,
+    normal: dir,
+    radius: circle.radius,
+    endRadius: circle.radius,
+    diameter: 2 * circle.radius,
+    length,
+    residuals: residual,
+    ...stats(residual),
+  };
+}
+
+export function constructCone(points) {
+  if (points.length < 4) throw new Error("Kegel braucht 4 Punkte: drei auf einem Kreis, einer in der Tiefe.");
+  const circle = fitCircle3D(points.slice(0, 3));
+  const origin = circle.center;
+  const r1 = circle.radius;
+  const far = points[points.length - 1];
+  const w = sub(far, origin);
+  const signed = dot(w, circle.normal);
+  if (Math.abs(signed) < 1e-4) throw new Error("Kegel: Punkt 4 liegt in der Kreisebene.");
+  const dir = signed >= 0 ? circle.normal : scale(circle.normal, -1);
+  const d = Math.abs(signed);
+  const radialVec = sub(w, scale(dir, dot(w, dir)));
+  const r2 = norm(radialVec);
+  const halfAngle = Math.atan(Math.abs(r2 - r1) / d);
+  const residual = new Float64Array(points.length);
+  return {
+    type: "Kegel",
+    center: add(origin, scale(dir, d / 2)),
+    start: origin,
+    normal: dir,
+    radius: r1,
+    endRadius: r2,
+    diameter: 2 * r1,
+    halfAngle,
+    length: d,
+    residuals: residual,
+    ...stats(residual),
+  };
+}
+
+export function constructSlot(points) {
+  if (points.length < 4) throw new Error("Langloch braucht 4 Punkte: drei am runden Ende, einer am anderen Ende.");
+  const circle = fitCircle3D(points.slice(0, 3));
+  const c1 = circle.center;
+  const radius = circle.radius;
+  const normal = circle.normal;
+  const far = points[3];
+  const projected = sub(far, scale(normal, dot(sub(far, c1), normal)));
+  const delta = sub(projected, c1);
+  const reach = norm(delta);
+  if (reach <= radius * 1.05) throw new Error("Langloch: Punkt 4 liegt zu nah am ersten Ende.");
+  const direction = unit(delta);
+  const length = reach + radius;
+  const residual = new Float64Array(points.length);
+  return {
+    type: "Langloch",
+    center: add(c1, scale(direction, (reach - radius) / 2)),
+    start: c1,
+    normal,
+    direction: canonical(direction),
+    radius,
+    width: 2 * radius,
+    length,
+    residuals: residual,
+    ...stats(residual),
+  };
+}
+
 export function fitCylinder(points, axisHint) {
-  if (points.length < 5) throw new Error("Zylinder braucht mindestens 5 Punkte, bitte mehr Fläche anmalen.");
-  const d0 = unit(axisHint);
+  if (points.length < 5) throw new Error("Zylinder braucht mindestens 5 Punkte.");
+  const d0 = unit(axisHint && norm(axisHint) > 1e-8 ? axisHint : [0, 0, 1]);
   const c0 = centroid(points);
   const [u, v] = basis(d0);
   const xy = points.map((q) => { const d = sub(q, c0); return [dot(d, u), dot(d, v)]; });
-  const k = fitCircle2D(xy);
-  const fn = (x, o) => {
-    const d = tiltAxis(d0, x[0], x[1]);
-    const c = add(c0, add(scale(u, x[2]), scale(v, x[3])));
-    for (let i = 0; i < points.length; i += 1) {
-      const w = sub(points[i], c);
-      const t = dot(w, d);
-      o[i] = Math.hypot(w[0] - t * d[0], w[1] - t * d[1], w[2] - t * d[2]) - x[4];
-    }
-  };
-  const out = levenbergMarquardt(fn, [0, 0, k.cx, k.cy, k.r], points.length);
-  const x = out.x;
-  const d = tiltAxis(d0, x[0], x[1]);
-  const c = add(c0, add(scale(u, x[2]), scale(v, x[3])));
+  const k = fitCircle2D(xy, true);
+  const c = add(c0, add(scale(u, k.cx), scale(v, k.cy)));
   let tmin = Infinity, tmax = -Infinity;
   for (const q of points) {
-    const t = dot(sub(q, c), d);
+    const t = dot(sub(q, c), d0);
     tmin = Math.min(tmin, t);
     tmax = Math.max(tmax, t);
   }
   const residual = new Float64Array(points.length);
-  fn(x, residual);
-  const radius = Math.abs(x[4]);
-  return { type: "Zylinder", center: add(c, scale(d, 0.5 * (tmin + tmax))), normal: canonical(d), radius, diameter: 2 * radius, length: tmax - tmin, residuals: residual, ...stats(residual) };
+  const radius = Math.abs(k.r);
+  points.forEach((q, i) => {
+    const w = sub(q, c);
+    const t = dot(w, d0);
+    residual[i] = Math.hypot(w[0] - t * d0[0], w[1] - t * d0[1], w[2] - t * d0[2]) - radius;
+  });
+  return { type: "Zylinder", center: add(c, scale(d0, 0.5 * (tmin + tmax))), normal: canonical(d0), radius, diameter: 2 * radius, length: tmax - tmin, residuals: residual, ...stats(residual) };
 }
 
 export function fitCone(points, normals) {
-  if (points.length < 6) throw new Error("Kegel braucht mindestens 6 Punkte, bitte mehr Fläche anmalen.");
+  if (points.length < 6) throw new Error("Kegel braucht mindestens 6 Punkte.");
   let d0 = axisFromNormals(normals, true).axis;
   const M = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
   const b = [0, 0, 0];
@@ -325,6 +438,27 @@ export function fitCone(points, normals) {
     sa += Math.atan2(norm(sub(w, scale(d0, t))), t);
   }
   const alpha0 = sa / points.length;
+  if (points.length <= 8) {
+    const d = canonical(d0);
+    let tmin = Infinity, tmax = -Infinity;
+    for (const q of points) {
+      const t = dot(sub(q, apex0), d);
+      tmin = Math.min(tmin, t);
+      tmax = Math.max(tmax, t);
+    }
+    const tm = 0.5 * (tmin + tmax);
+    const ha = Math.abs(alpha0);
+    const residual = new Float64Array(points.length);
+    const ca = Math.cos(ha), sn = Math.sin(ha);
+    points.forEach((q, i) => {
+      const w = sub(q, apex0);
+      const t = dot(w, d);
+      const rad = Math.hypot(w[0] - t * d[0], w[1] - t * d[1], w[2] - t * d[2]);
+      residual[i] = rad * ca - t * sn;
+    });
+    const radius = Math.abs(tm * Math.tan(ha));
+    return { type: "Kegel", center: add(apex0, scale(d, tm)), normal: d, apex: apex0, halfAngle: ha, radius, diameter: 2 * radius, length: Math.max(tmax - tmin, 0), residuals: residual, ...stats(residual) };
+  }
   const sc = Math.max(norm(sub(cp, apex0)), 1e-6);
   const fn = (x, o) => {
     const d = tiltAxis(d0, x[0], x[1]);
@@ -364,7 +498,7 @@ function stadium(x, y, cx, cy, th, h, r) {
 }
 
 export function fitSlot(points, axis) {
-  if (points.length < 8) throw new Error("Langloch braucht mindestens 8 Punkte, bitte mehr Fläche anmalen.");
+  if (points.length < 5) throw new Error("Langloch braucht mindestens 5 Punkte.");
   const n = canonical(unit(axis));
   const c0 = centroid(points);
   const [u, v] = basis(n);
@@ -421,11 +555,11 @@ export function fitType(type, points, normals, robustFit = true) {
     switch (type) {
       case "Ebene": return fitPlane(pp, nn.length ? centroid(nn) : undefined);
       case "Kugel": return fitSphere(pp);
-      case "Zylinder": return fitCylinder(pp, axisFromNormals(nn.length ? nn : pp.map(() => [0, 0, 1])).axis);
-      case "Kreis": return fitCircle3D(pp, nn.length ? axisFromNormals(nn).axis : undefined);
-      case "Langloch": return fitSlot(pp, axisFromNormals(nn.length ? nn : pp).axis);
-      case "Kegel": return fitCone(pp, nn.length ? nn : pp.map(() => [0, 0, 1]));
-      case "Linie": return fitLine(pp);
+      case "Zylinder": return pp.length <= 4 ? constructCylinder(pp) : fitCylinder(pp, axisFromNormals(nn.length ? nn : pp.map(() => [0, 0, 1])).axis);
+      case "Kreis": return fitCircle3D(pp);
+      case "Langloch": return pp.length <= 4 ? constructSlot(pp) : fitSlot(pp, nn.length ? unit(centroid(nn)) : fitPlane(pp).normal);
+      case "Kegel": return pp.length <= 4 ? constructCone(pp) : fitCone(pp, nn.length ? nn : pp.map(() => [0, 0, 1]));
+      case "Linie": return pp.length <= 2 ? constructLine(pp) : fitLine(pp);
       default: throw new Error("Typ nicht ausgleichbar: " + type);
     }
   };
@@ -475,7 +609,9 @@ export function autoFit(points, normals) {
 export function formatFit(fit) {
   const mm = (value) => new Intl.NumberFormat("de-DE", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value);
   const bits = [fit.type];
-  if (fit.diameter) bits.push(`Durchmesser ${mm(fit.diameter)} mm`);
+  if (fit.endRadius != null && fit.radius != null && Math.abs(fit.endRadius - fit.radius) > 1e-3) {
+    bits.push(`Durchmesser ${mm(2 * fit.radius)} / ${mm(2 * fit.endRadius)} mm`);
+  } else if (fit.diameter) bits.push(`Durchmesser ${mm(fit.diameter)} mm`);
   else if (fit.radius) bits.push(`Radius ${mm(fit.radius)} mm`);
   if (fit.length) bits.push(`Laenge ${mm(fit.length)} mm`);
   if (fit.width && fit.type === "Langloch") bits.push(`Breite ${mm(fit.width)} mm`);
