@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "space": "obj",
+  "description": "Vorgabe-Layout. anchor liegt im ursprünglichen OBJ-Koordinatensystem (mm, nicht zentriert). flag.x und flag.y sind die linke obere Ecke des Fähnchens als Anteil der Bühnenbreite und -höhe (0–1). flag.pinned true hält die Position beim Ändern der Iframe-Größe. Eine aus der Seite exportierte Datei kann diese Datei ersetzen. localStorage im Browser überschreibt sie.",
+  "placements": {
+    "zyl-a-dm": {
+      "anchor": { "x": 37.573, "y": 60.893, "z": 68.75 }
+    },
+    "planlauf-deckel": {
+      "anchor": { "x": 168.04, "y": 50.0, "z": 25.954 }
+    },
+    "pos-bohrung-b": {
+      "anchor": { "x": 304.651, "y": 148.637, "z": 73.425 }
+    },
+    "abstand-anschraub": {
+      "anchor": { "x": 425.295, "y": 147.957, "z": 74.026 }
+    },
+    "ebenheit-dichtung": {
+      "anchor": { "x": 529.167, "y": 127.605, "z": 53.451 }
+    },
+    "rundheit-lager": {
+      "anchor": { "x": 610.0, "y": 56.078, "z": -46.364 }
+    }
+  }
+}
