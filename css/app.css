@@ -501,6 +501,66 @@ body.is-editing #leaders .handle { pointer-events: auto; cursor: grab; }
 .geo-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
 #editor[hidden] { display: none; }
 
+.demo-note {
+  margin: 0;
+  padding: 6px 12px;
+  background: #fff6dd;
+  color: #1b2330;
+  font-size: 13px;
+}
+.demo-note[hidden] { display: none; }
+
+#wizard {
+  flex: 0 0 380px;
+  width: 380px;
+  overflow: auto;
+  background: #fff;
+  border-right: 1px solid #d5dbe3;
+  padding: 12px;
+  z-index: 3;
+}
+#wizard[hidden] { display: none; }
+.wizard-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.wizard-head h2 { margin: 0 0 8px; font-size: 16px; }
+.wizard-steps { display: flex; flex-wrap: wrap; gap: 4px; margin: 0 0 10px; }
+.wizard-steps button {
+  border: 1px solid #d5dbe3;
+  background: #f4f6f8;
+  border-radius: 99px;
+  padding: 3px 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.wizard-steps button.is-current { background: #1b2330; color: #fff; border-color: #1b2330; }
+.wizard-row { display: flex; gap: 8px; margin: 8px 0; }
+#wizard label { display: flex; flex-direction: column; gap: 4px; margin: 0 0 8px; font-size: 12px; }
+#wizard input[type="search"], #wizard input[type="url"], #wizard input[type="password"], #wizard input[type="number"] {
+  font: inherit;
+  padding: 6px 8px;
+  border: 1px solid #c5ccd6;
+  border-radius: 4px;
+}
+.pick-list { list-style: none; margin: 8px 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.pick-list button, .pick-list label.pick {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  font-size: 13px;
+  background: #fff;
+  border: 1px solid #d5dbe3;
+  border-radius: 4px;
+  padding: 6px 8px;
+  cursor: pointer;
+}
+.pick-list button:hover, .pick-list label.pick:hover { border-color: #2456b5; }
+.pick-list .meta { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.pick-list .warn { color: #8a4b08; font-weight: 650; }
+body.labels-small .flag { width: clamp(108px, 18cqw, 148px); font-size: 11px; padding: 4px 5px; }
+body.labels-small .flag-name { font-size: 11px; }
+
 @media (prefers-reduced-motion: reduce) {
   .spinner { animation: none; }
 }

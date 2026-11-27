@@ -4,7 +4,7 @@ import { pickGesture, tapSlop } from "./pointertap.js";
 import { ViewCube } from "./viewcube.js";
 import { keepLegacyFit, projectOutline } from "./polyline.js";
 import { OBJLoader } from "three/addons/loaders/OBJLoader.js";
-import { createDataSource } from "./data-source.js";
+import { createDataSource, normalizeMeasurements } from "./data-source.js";
 import {
   add,
   scale,
@@ -19,6 +19,7 @@ import {
 import { DEFAULT_TEMPLATE, normalizeTemplate, renderFlag } from "./label-template.js";
 import { fitType, formatFit } from "./fit.js";
 import { buildMesh } from "./mesh-select.js";
+import { startWizard } from "./wizard.js";
 
 // Anchors and geometries are stored in the original OBJ coordinate system.
 // The mesh is not moved, so a raycast hit can be saved as-is.
@@ -54,6 +55,10 @@ const UI = {
 
 const els = {
   partName: document.getElementById("part-name"),
+  appVersion: document.getElementById("app-version"),
+  demoNote: document.getElementById("demo-note"),
+  wizard: document.getElementById("wizard"),
+  changeSelection: document.getElementById("change-selection"),
   templateBadge: document.getElementById("template-badge"),
   dataBadge: document.getElementById("data-badge"),
   setupBadge: document.getElementById("setup-badge"),
@@ -181,6 +186,14 @@ async function main() {
   initViewer();
 
   const params = new URLSearchParams(location.search);
+  const helper = await detectHelper();
+  if (helper?.version && els.appVersion) els.appVersion.textContent = helper.version;
+  if (helper) {
+    await startAuthor(params);
+    return;
+  }
+  if (els.demoNote) els.demoNote.hidden = false;
+
   const layoutUrl = new URL("../data/layout.json", import.meta.url);
   const exampleUrl = new URL("../data/example-measurements.json", import.meta.url);
   const liveUrl = new URL("../data/live-measurements.json", import.meta.url);
@@ -251,6 +264,122 @@ async function main() {
       projectToStage,
       acceptData,
     };
+  }
+}
+
+async function detectHelper() {
+  try {
+    const response = await fetch("/api/version", { cache: "no-store" });
+    if (!response.ok) return null;
+    const body = await response.json();
+    if (!body?.version) return null;
+    return body;
+  } catch {
+    return null;
+  }
+}
+
+async function startAuthor(params) {
+  document.body.dataset.mode = "author";
+  if (els.partName) els.partName.textContent = "";
+  state.model = new THREE.Group();
+  state.model.name = "models";
+  scene.add(state.model);
+  if (params.has("probe")) window.__probe = probeApi();
+  syncChrome();
+  resizeRenderer();
+  reveal();
+  startLoop();
+  if (els.changeSelection) {
+    els.changeSelection.hidden = false;
+    els.changeSelection.addEventListener("click", () => {
+      if (els.wizard) els.wizard.hidden = false;
+    });
+  }
+  startWizard({ apply: applyAuthorSelection });
+}
+
+async function applyAuthorSelection(selection) {
+  els.loading.hidden = false;
+  els.loadingText.textContent = "Modelle werden geladen …";
+  clearModelGroup();
+  const seen = new Set();
+  for (const model of selection.models) {
+    if (!model.hash || seen.has(model.hash)) continue;
+    seen.add(model.hash);
+    const response = await fetch(`/api/models/${encodeURIComponent(model.hash)}`, { cache: "force-cache" });
+    if (!response.ok) throw new Error(`${model.name} konnte nicht geladen werden.`);
+    const parsed = new OBJLoader().parse(await response.text());
+    parsed.name = model.name || model.hash;
+    parsed.traverse((obj) => {
+      if (!obj.isMesh) return;
+      obj.material = new THREE.MeshStandardMaterial({
+        color: 0xb7bcc2,
+        metalness: 0.06,
+        roughness: 0.58,
+        side: THREE.FrontSide,
+      });
+    });
+    state.model.add(parsed);
+  }
+  indexLoadedModel(state.model);
+  const partTemplate = selection.template?.id
+    ? { id: selection.template.id, name: selection.template.name || "" }
+    : { id: `piece:${selection.piece?.id || "teil"}`, name: selection.piece?.name || "" };
+  const data = normalizeMeasurements({
+    schemaVersion: 1,
+    source: "live",
+    refreshSeconds: 60,
+    part: { id: selection.project.id, name: selection.project.name, template: partTemplate },
+    pieces: [],
+    features: [],
+    characteristics: selection.controls.map(characteristicFromControl),
+  });
+  acceptData(data, { mode: "live", initial: true, switched: true });
+  document.body.classList.toggle("labels-small", Boolean(selection.smallLabels));
+  if (selection.smallLabels && state.setup) {
+    state.setup.labelTemplate.size = "S";
+    if (state.saved) state.saved.labelTemplate.size = "S";
+    renderFlags();
+  }
+  if (els.wizard) els.wizard.hidden = true;
+  frameModel(state.model, null);
+  cameraIsSaved = false;
+  state.userMovedCamera = false;
+  reveal();
+}
+
+function characteristicFromControl(control) {
+  const nominal = Number(control.nominal);
+  const low = Number(control.tolerances?.low);
+  const up = Number(control.tolerances?.up);
+  const hasNominal = Number.isFinite(nominal);
+  const lowN = Number.isFinite(low) ? low : 0;
+  const upN = Number.isFinite(up) ? up : 0;
+  const title = control.objectName ? `${control.objectName} / ${control.name}` : control.name || control.id;
+  return {
+    id: String(control.id),
+    name: title,
+    objectName: control.objectName || "",
+    controlName: control.name || "",
+    displayName: control.displayName || "",
+    unit: "mm",
+    nominal: hasNominal ? nominal : 0,
+    usl: hasNominal ? nominal + upN : upN,
+    lsl: hasNominal ? nominal + lowN : lowN,
+    measurements: [],
+  };
+}
+
+function clearModelGroup() {
+  if (!state.model) return;
+  while (state.model.children.length) {
+    const child = state.model.children[0];
+    child.traverse((obj) => {
+      if (obj.geometry) obj.geometry.dispose();
+      if (obj.material) obj.material.dispose();
+    });
+    state.model.remove(child);
   }
 }
 
@@ -1591,13 +1720,14 @@ function updatePickMarkers() {
 }
 
 function capturePick(hit) {
-  const face = state.meshIndex?.faces[hit.faceIndex];
+  const meshIndex = hit.mesh?.userData?.meshIndex || state.meshIndex;
+  const face = meshIndex?.faces[hit.faceIndex];
   if (state.snap && face) {
     const target = [hit.point.x, hit.point.y, hit.point.z];
     let best = face.i0;
     let bestDistance = Infinity;
     for (const id of [face.i0, face.i1, face.i2]) {
-      const point = state.meshIndex.vertices[id];
+      const point = meshIndex.vertices[id];
       const distance = Math.hypot(point[0] - target[0], point[1] - target[1], point[2] - target[2]);
       if (distance < bestDistance) {
         best = id;
@@ -1606,8 +1736,8 @@ function capturePick(hit) {
     }
     return {
       id: best,
-      point: state.meshIndex.vertices[best].slice(),
-      normal: state.meshIndex.vertexNormals[best].slice(),
+      point: meshIndex.vertices[best].slice(),
+      normal: meshIndex.vertexNormals[best].slice(),
     };
   }
   return {
@@ -1981,10 +2111,12 @@ function probeApi() {
 function indexLoadedModel(group) {
   let found = null;
   group.traverse((obj) => {
-    if (found || !obj.isMesh) return;
+    if (!obj.isMesh) return;
     const position = obj.geometry.attributes.position.array;
     const index = obj.geometry.index ? obj.geometry.index.array : null;
-    found = buildMesh(position, index);
+    const built = buildMesh(position, index);
+    obj.userData.meshIndex = built;
+    if (!found) found = built;
   });
   state.meshIndex = found;
 }
@@ -2351,12 +2483,14 @@ function pickSurface(event) {
     point: { x: hit.point.x, y: hit.point.y, z: hit.point.z },
     normal,
     faceIndex: hit.faceIndex ?? 0,
+    mesh: hit.object,
   };
 }
 
 function syncChrome() {
   const live = state.dataMode === "live";
-  els.dataBadge.textContent = live ? "Live" : "Beispieldaten";
+  const author = document.body.dataset.mode === "author" && !live;
+  els.dataBadge.textContent = live ? "Live" : author ? "Helfer" : "Beispieldaten";
   els.dataBadge.classList.toggle("is-live", live);
   els.setupBadge.hidden = false;
   els.setupBadge.textContent = state.usingDraft ? "Lokaler Entwurf" : "Veröffentlichte Ansicht";

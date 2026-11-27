@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light" />
-    <title>Milkyway – Merkmale</title>
+    <title>Merkmale</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%231b2330'/%3E%3Cpath d='M2 12 L8 3 L14 12' fill='none' stroke='%23f0b429' stroke-width='1.6'/%3E%3C/svg%3E" />
     <link rel="stylesheet" href="css/app.css" />
     <script type="importmap">
@@ -24,6 +24,7 @@
           <span class="badge" id="template-badge" hidden></span>
           <span class="badge" id="data-badge">Beispieldaten</span>
           <span class="badge is-published" id="setup-badge">Veröffentlichte Ansicht</span>
+          <span class="badge" id="app-version">0.6.0</span>
         </h1>
         <div class="tools">
           <label class="filter">
@@ -39,6 +40,7 @@
           <label class="filter">Von <input id="filter-from" type="date" aria-label="Von Datum" /></label>
           <label class="filter">Bis <input id="filter-to" type="date" aria-label="Bis Datum" /></label>
           <button type="button" id="view-lock" class="is-locked" aria-pressed="true">Ansicht entsperren</button>
+          <button type="button" id="change-selection" hidden>Auswahl ändern</button>
           <button type="button" id="prepare">Vorbereiten</button>
           <button type="button" id="finish" hidden>Abschließen</button>
           <button type="button" id="discard" hidden>Verwerfen</button>
@@ -48,7 +50,58 @@
           <button type="button" id="reset" title="Lokalen Entwurf löschen und die veröffentlichte Ansicht laden">Zurücksetzen</button>
         </div>
       </header>
+      <p id="demo-note" class="demo-note" hidden>Beispielansicht ohne Helfer. Eigene Projekte: DL-Merkmal-Viewer starten (localhost:8765).</p>
       <div id="workspace">
+        <aside id="wizard" hidden>
+          <div class="wizard-head">
+            <h2>Projekt öffnen</h2>
+            <button type="button" id="wizard-settings">Einstellungen</button>
+          </div>
+          <p id="wizard-error" class="note" hidden></p>
+          <section id="wizard-settings-panel" hidden>
+            <label>Server-URL <input id="settings-server" type="url" autocomplete="off" placeholder="https://server.example" /></label>
+            <label>Token <input id="settings-token" type="password" autocomplete="new-password" placeholder="leer lassen, um das gespeicherte Token zu behalten" /></label>
+            <label>Intervall (Sekunden) <input id="settings-poll" type="number" min="5" max="3600" step="5" value="60" /></label>
+            <p class="note">Das Token bleibt auf diesem Rechner (DPAPI) und wird nicht an die Seite zurückgegeben.</p>
+            <button type="button" id="settings-save">Speichern</button>
+          </section>
+          <nav class="wizard-steps" aria-label="Schritte">
+            <button type="button" data-wizard-step="search" class="is-current">1 Projekt</button>
+            <button type="button" data-wizard-step="choice">2 Vorlage / Teil</button>
+            <button type="button" data-wizard-step="models">3 Referenzobjekte</button>
+            <button type="button" data-wizard-step="controls">4 Merkmale</button>
+          </nav>
+          <section data-panel="search">
+            <label>Projektname <input id="project-q" type="search" placeholder="Name enthält …" /></label>
+            <label>Workspace <input id="project-ws" type="search" placeholder="optional" /></label>
+            <div class="wizard-row">
+              <button type="button" id="project-search">Suchen</button>
+              <button type="button" id="project-more" hidden>Weitere</button>
+            </div>
+            <ul id="project-results" class="pick-list"></ul>
+          </section>
+          <section data-panel="choice" hidden>
+            <p id="choice-title" class="note"></p>
+            <ul id="template-results" class="pick-list"></ul>
+            <button type="button" id="show-pieces" hidden>Teil ohne Vorlage</button>
+            <div id="piece-search" hidden>
+              <label>Teilname <input id="piece-q" type="search" /></label>
+              <button type="button" id="piece-go">Teile suchen</button>
+            </div>
+            <ul id="piece-results" class="pick-list"></ul>
+          </section>
+          <section data-panel="models" hidden>
+            <p class="note">Jedes Referenzobjekt bleibt in seinen eigenen Koordinaten. Gleiche Datei (gleicher Hash) wird nur einmal geladen.</p>
+            <ul id="model-results" class="pick-list"></ul>
+            <button type="button" id="models-next">Weiter</button>
+          </section>
+          <section data-panel="controls" hidden>
+            <label class="checkline"><input id="small-labels" type="checkbox" /> Kleine Beschriftungen</label>
+            <p id="control-cap" class="note">0 von 10</p>
+            <ul id="control-results" class="pick-list"></ul>
+            <button type="button" id="controls-apply">Übernehmen</button>
+          </section>
+        </aside>
         <aside id="editor" hidden>
           <p class="note">Abschließen speichert Kamera, Geometrien, Fußpunkte, Fähnchen und die Beschriftung nur in diesem Browser (Lokaler Entwurf). Exportieren und <code>data/layout.json</code> ersetzen, damit alle die Ansicht sehen.</p>
           <h2>Zuordnung</h2>
