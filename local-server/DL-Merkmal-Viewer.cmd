@@ -6,21 +6,23 @@ exit /b
 $ErrorActionPreference = 'Stop'
 if (-not $env:LOCALAPPDATA) { $env:LOCALAPPDATA = [IO.Path]::GetTempPath() }
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+$Script:Version = '0.6.0'
 $Script:AppDir = Join-Path $env:LOCALAPPDATA 'DL-Merkmal-Viewer'
 $Script:SettingsFile = Join-Path $Script:AppDir 'settings.json'
-$Script:WatchFile = Join-Path $Script:AppDir 'watched.json'
 $Script:CacheDir = Join-Path $Script:AppDir 'cache'
 $Script:Pages = 'https://deanosaurus89.github.io/embedded_semi_interactive_test'
 $Script:HostUrl = ''
 $Script:Token = ''
 $Script:PollSeconds = 60
-$Script:LastPieces = 50
-$Script:TemplateId = ''
-$Script:TemplateName = ''
-$Script:PieceCache = @{}
-$Script:Sync = [hashtable]::Synchronized(@{ LiveJson = ''; ModelPath = ''; Status = 'Bereit'; Stop = $false; WantTop = '50'; WantFrom = ''; WantTo = '' })
+$Script:Www = ''
+$Script:Stop = $false
+$Script:SizeCache = @{}
+$Script:MockJson = $null
+$Script:MockSizes = $null
+$Script:MockCalls = 0
+$Script:LastUrl = ''
 $Script:StaticFiles = @(
-  'index.html','css/app.css','js/app.js','js/data-source.js','js/geometry.js','js/label-template.js','js/fit.js','js/mesh-select.js','js/tumble-controls.js','js/tumble.js','js/mw-vec.js','js/pointertap.js','js/viewsnap.js','js/viewcube.js','js/polyline.js','data/layout.json','data/example-measurements.json','models/milkyway.obj'
+  'index.html','css/app.css','js/app.js','js/wizard.js','js/data-source.js','js/geometry.js','js/label-template.js','js/fit.js','js/mesh-select.js','js/tumble-controls.js','js/tumble.js','js/mw-vec.js','js/pointertap.js','js/viewsnap.js','js/viewcube.js','js/polyline.js','data/layout.json','data/example-measurements.json','models/milkyway.obj'
 )
 
 function As-One($v) {
@@ -38,132 +40,8 @@ function Normalize-SearchTerm($Term) {
   if ($t -eq '' -or $t -eq '*' -or $t -eq '%') { return '' }
   return $t
 }
+function New-List { $list = New-Object System.Collections.Generic.List[object]; return ,$list }
 function Get-ApiBase { ($Script:HostUrl.TrimEnd('/')) + '/dataloopcore/api/metrology/v2' }
-function New-ProjRef($project, $workspace) {
-  $ws = As-One $workspace
-  [pscustomobject]@{
-    projectId = As-Str $project.id
-    projectName = As-Str $project.name
-    workspaceId = As-Str $(if ($null -ne $ws) { $ws.id } else { $null })
-    workspaceName = As-Str $(if ($null -ne $ws) { $ws.name } else { $null })
-  }
-}
-function Invoke-DlGet([string]$Url) {
-  if (-not $Script:HostUrl) { throw 'Keine Server-URL' }
-  if (-not $Script:Token) { throw 'Kein Token' }
-  $r = [System.Net.HttpWebRequest]::Create($Url)
-  $r.Method = 'GET'; $r.Accept = 'application/json'; $r.Timeout = 120000
-  $r.Headers.Add('Authorization', "Bearer $($Script:Token)")
-  $resp = $null
-  try { $resp = $r.GetResponse() } catch [System.Net.WebException] { $resp = $_.Exception.Response; if (-not $resp) { throw $_.Exception.Message } }
-  $status = 0; $text = ''
-  try {
-    $status = [int]$resp.StatusCode
-    $sr = New-Object IO.StreamReader($resp.GetResponseStream(), [Text.Encoding]::UTF8)
-    $text = $sr.ReadToEnd(); $sr.Close()
-  } finally { $resp.Close() }
-  if ($status -lt 200 -or $status -ge 300) { throw "HTTP $status" }
-  if ($text) { return ($text | ConvertFrom-Json) }
-  return $null
-}
-function Build-Url([string]$Path, [hashtable]$Params) {
-  $q = ($Params.GetEnumerator() | Sort-Object Name | ForEach-Object { "$($_.Name)=$(UrlEnc $_.Value)" }) -join '&'
-  (Get-ApiBase) + $Path + $(if ($q) { "?$q" } else { '' })
-}
-function Get-DlAll([string]$Path, [hashtable]$Params) {
-  $url = Build-Url $Path $Params
-  $acc = New-Object System.Collections.Generic.List[object]
-  $guard = 0
-  while ($url -and $guard -lt 30) {
-    $guard++
-    $j = Invoke-DlGet $url
-    foreach ($v in @($j.value)) { if ($null -ne $v) { [void]$acc.Add($v) } }
-    $url = $j.'@odata.nextLink'
-  }
-  $out = @()
-  foreach ($item in $acc) { $out += $item }
-  return $out
-}
-function Search-Workspaces([string]$Term) {
-  $Term = Normalize-SearchTerm $Term
-  $p = @{ '$select' = 'id,name'; '$orderby' = 'name'; '$top' = '50' }
-  if ($Term) { $p['$filter'] = "contains(tolower(name),'$(Esc $Term.ToLower())')" }
-  $rows = @()
-  foreach ($item in @((Invoke-DlGet (Build-Url '/Workspaces' $p)).value)) { if ($null -ne $item) { $rows += $item } }
-  return $rows
-}
-function Build-PieceFilter([string]$ProjectId, [string]$TemplateId, [string]$From, [string]$To) {
-  $filter = "inspectorProject/id eq $ProjectId"
-  if ($TemplateId) { $filter = $filter + " and inspectorPieceTemplate/id eq $TemplateId" }
-  if ($From -match '^\d{4}-\d{2}-\d{2}$') { $filter = $filter + " and creationDateUser ge ${From}T00:00:00Z" }
-  if ($To -match '^\d{4}-\d{2}-\d{2}$') { $filter = $filter + " and creationDateUser le ${To}T23:59:59Z" }
-  return $filter
-}
-function Get-ODataCount([string]$Path, [hashtable]$Params) {
-  $copy = @{}
-  foreach ($key in @($Params.Keys)) { $copy[$key] = $Params[$key] }
-  $copy['$count'] = 'true'
-  $copy['$top'] = '1'
-  $json = Invoke-DlGet (Build-Url $Path $copy)
-  $count = $json.'@odata.count'
-  if ($null -eq $count) { return @($json.value).Count }
-  return [int]$count
-}
-function Get-PieceTemplates([string]$ProjectId) {
-  $rows = @()
-  try {
-    $rows = @(Get-DlAll '/InspectorPieceTemplates' @{ '$filter' = "inspectorProject/id eq $ProjectId"; '$orderby' = 'name' })
-  } catch { $rows = @() }
-  if ($rows.Count -eq 0) {
-    try {
-      $project = Invoke-DlGet ((Get-ApiBase) + "/InspectorProjects/$ProjectId" + '?$expand=inspectorPieceTemplates')
-      $rows = @($project.inspectorPieceTemplates)
-    } catch { $rows = @() }
-  }
-  $out = @()
-  foreach ($row in $rows) {
-    if ($null -eq $row) { continue }
-    $id = As-Str $row.id
-    if (-not $id) { continue }
-    $count = 0
-    try {
-      $count = Get-ODataCount '/InspectorPieces' @{ '$filter' = "inspectorProject/id eq $ProjectId and inspectorPieceTemplate/id eq $id" }
-    } catch { $count = 0 }
-    $out += [pscustomobject]@{ id = $id; name = (As-Str $row.name); pieceCount = $count }
-  }
-  return $out
-}
-function Get-TemplateControlNames([string]$ProjectId, [string]$TemplateId) {
-  $pieces = @(Get-DlAll '/InspectorPieces' @{
-    '$filter' = "inspectorProject/id eq $ProjectId and inspectorPieceTemplate/id eq $TemplateId"
-    '$orderby' = 'creationDateUser desc'
-    '$top' = '1'
-    '$select' = 'id'
-  })
-  if ($pieces.Count -lt 1 -or $null -eq $pieces[0]) { return @() }
-  $controls = @(Get-DlAll '/Controls' @{ '$filter' = "inspectorPiece/id eq $(As-Str $pieces[0].id)" })
-  $names = @()
-  foreach ($control in $controls) {
-    if ($null -eq $control) { continue }
-    $names += (Get-ControlId $control)
-  }
-  return $names
-}
-function Search-Projects([string]$Mode, [string]$Term) {
-  $Term = Normalize-SearchTerm $Term
-  $out = @()
-  if ($Mode -eq 'Workspace') {
-    foreach ($w in @(Search-Workspaces $Term)) {
-      $projs = @(Get-DlAll '/InspectorProjects' @{ '$filter' = "workspace/id eq $(As-Str $w.id)"; '$select' = 'id,name'; '$orderby' = 'name' })
-      foreach ($p in $projs) { $out += (New-ProjRef $p $w) }
-    }
-  } else {
-    $p = @{ '$select' = 'id,name'; '$expand' = 'workspace($select=id,name)'; '$orderby' = 'name'; '$top' = '200' }
-    if ($Term) { $p['$filter'] = "contains(tolower(name),'$(Esc $Term.ToLower())')" }
-    foreach ($x in @((Invoke-DlGet (Build-Url '/InspectorProjects' $p)).value)) { $out += (New-ProjRef $x $x.workspace) }
-  }
-  return $out
-}
 function Read-Utf8Text([string]$Path) {
   $bytes = [IO.File]::ReadAllBytes($Path)
   if ($bytes.Length -eq 0) { return '' }
@@ -173,9 +51,17 @@ function Read-Utf8Text([string]$Path) {
 }
 function Write-Utf8Text([string]$Path, [string]$Text) {
   $dir = Split-Path -Parent $Path
-  if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null }
+  if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null }
   $enc = New-Object System.Text.UTF8Encoding $false
   [IO.File]::WriteAllText($Path, $Text, $enc)
+}
+function Write-Log([string]$Text) {
+  try {
+    $path = Join-Path $Script:AppDir 'logs\helper.log'
+    $dir = Split-Path -Parent $path
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null }
+    Add-Content -LiteralPath $path -Value ("{0} {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Text) -Encoding ASCII
+  } catch {}
 }
 function ConvertTo-PlainJson($Value) {
   if ($null -eq $Value) { return 'null' }
@@ -208,39 +94,227 @@ function ConvertTo-JsonArray($items) {
   if ($parts.Count -eq 0) { return '[]' }
   return '[' + ($parts -join ',') + ']'
 }
-function Load-Watched {
-  if (-not (Test-Path $Script:WatchFile)) { return $null }
-  $raw = (Read-Utf8Text $Script:WatchFile).Trim().TrimStart([char]0xFEFF)
-  if (-not $raw -or $raw -eq '[]') { return $null }
-  $data = ConvertFrom-Json -InputObject $raw
-  $first = As-One @($data)
-  if ($null -eq $first) { return $null }
-  return [pscustomobject]@{
-    projectId = As-Str $first.projectId
-    projectName = As-Str $first.projectName
-    workspaceId = As-Str $first.workspaceId
-    workspaceName = As-Str $first.workspaceName
-  }
+function Build-Url([string]$Path, [hashtable]$Params) {
+  $q = ($Params.GetEnumerator() | Sort-Object Name | ForEach-Object { "$($_.Name)=$(UrlEnc $_.Value)" }) -join '&'
+  (Get-ApiBase) + $Path + $(if ($q) { "?$q" } else { '' })
 }
-function Save-Watched($proj) {
-  if ($null -eq $proj) { Write-Utf8Text $Script:WatchFile '[]'; return }
-  $entry = [pscustomobject]@{
-    projectId = As-Str $proj.projectId
-    projectName = As-Str $proj.projectName
-    workspaceId = As-Str $proj.workspaceId
-    workspaceName = As-Str $proj.workspaceName
+function Invoke-DlGet([string]$Url) {
+  if ($Script:MockJson) {
+    $Script:MockCalls = [int]$Script:MockCalls + 1
+    $Script:LastUrl = $Url
+    $text = & $Script:MockJson $Url
+    if ($null -eq $text -or $text -eq '') { return $null }
+    return ($text | ConvertFrom-Json)
   }
-  Write-Utf8Text $Script:WatchFile (ConvertTo-JsonArray @($entry))
+  if (-not $Script:HostUrl) { throw 'Keine Server-URL' }
+  if (-not $Script:Token) { throw 'Kein Token' }
+  $r = [System.Net.HttpWebRequest]::Create($Url)
+  $r.Method = 'GET'; $r.Accept = 'application/json'; $r.Timeout = 120000
+  $r.Headers.Add('Authorization', "Bearer $($Script:Token)")
+  $resp = $null
+  try { $resp = $r.GetResponse() } catch [System.Net.WebException] { $resp = $_.Exception.Response; if (-not $resp) { throw $_.Exception.Message } }
+  $status = 0; $text = ''
+  try {
+    $status = [int]$resp.StatusCode
+    $sr = New-Object IO.StreamReader($resp.GetResponseStream(), [Text.Encoding]::UTF8)
+    $text = $sr.ReadToEnd(); $sr.Close()
+  } finally { $resp.Close() }
+  if ($status -lt 200 -or $status -ge 300) { throw "HTTP $status" }
+  if ($text) { return ($text | ConvertFrom-Json) }
+  return $null
+}
+function Invoke-DlRange([string]$Hash) {
+  $url = (Get-ApiBase) + '/Files/' + $Hash
+  $r = [System.Net.HttpWebRequest]::Create($url)
+  $r.Method = 'GET'; $r.Timeout = 60000
+  $r.AddRange(0, 255)
+  $r.Headers.Add('Authorization', "Bearer $($Script:Token)")
+  $resp = $r.GetResponse()
+  try {
+    $total = [int64]0
+    $cr = [string]$resp.Headers['Content-Range']
+    if ($cr -match '/(\d+)\s*$') { $total = [int64]$Matches[1] }
+    if ($total -le 0) {
+      $len = $resp.ContentLength
+      if ($len -gt 0) { $total = [int64]$len }
+    }
+    $stream = $resp.GetResponseStream()
+    $buf = New-Object byte[] 256
+    [void]$stream.Read($buf, 0, $buf.Length)
+    $stream.Close()
+    return $total
+  } finally { $resp.Close() }
+}
+function Get-ModelSize([string]$Hash) {
+  $Hash = $Hash.ToLower()
+  if ($Script:SizeCache.ContainsKey($Hash)) { return [int64]$Script:SizeCache[$Hash] }
+  $size = [int64]0
+  if ($Script:MockSizes -and $Script:MockSizes.ContainsKey($Hash)) { $size = [int64]$Script:MockSizes[$Hash] }
+  else { $size = Invoke-DlRange $Hash }
+  $Script:SizeCache[$Hash] = $size
+  return $size
+}
+function Get-Rows($json) {
+  $list = New-List
+  if ($null -eq $json) { return $list }
+  $value = $null
+  if ($json -is [System.Array]) { $value = $json }
+  elseif ($json.PSObject.Properties.Name -contains 'value') { $value = $json.value }
+  if ($null -eq $value) { return $list }
+  foreach ($row in @($value)) { if ($null -ne $row) { [void]$list.Add($row) } }
+  return $list
+}
+function Get-ProjectPage([string]$Q, [string]$Workspace, [int]$Top, [int]$Skip) {
+  if ($Top -lt 1) { $Top = 20 }
+  if ($Top -gt 50) { $Top = 50 }
+  if ($Skip -lt 0) { $Skip = 0 }
+  $Q = Normalize-SearchTerm $Q
+  $Workspace = Normalize-SearchTerm $Workspace
+  $filters = New-Object System.Collections.Generic.List[string]
+  if ($Q) { [void]$filters.Add("contains(tolower(name),'$(Esc $Q.ToLower())')") }
+  if ($Workspace) { [void]$filters.Add("contains(tolower(workspace/name),'$(Esc $Workspace.ToLower())')") }
+  $p = @{ '$select' = 'id,name'; '$expand' = 'workspace($select=id,name)'; '$orderby' = 'name'; '$top' = [string]$Top; '$skip' = [string]$Skip; '$count' = 'true' }
+  if ($filters.Count -gt 0) { $p['$filter'] = ($filters -join ' and ') }
+  $before = [int]$Script:MockCalls
+  $json = Invoke-DlGet (Build-Url '/InspectorProjects' $p)
+  if ($Script:MockJson -and ([int]$Script:MockCalls - $before) -ne 1) { throw 'Projektliste darf nur eine Seite laden' }
+  $items = New-List
+  foreach ($x in @(Get-Rows $json)) {
+    $ws = ''
+    if ($x.workspace) { $ws = As-Str $x.workspace.name }
+    [void]$items.Add(@{ id = (As-Str $x.id); name = (As-Str $x.name); workspaceName = $ws })
+  }
+  $total = $items.Count
+  if ($json -and ($json.PSObject.Properties.Name -contains '@odata.count') -and $null -ne $json.'@odata.count') { $total = [int]$json.'@odata.count' }
+  return @{ total = $total; skip = $Skip; top = $Top; items = $items }
+}
+function Get-ODataCount([string]$Path, [hashtable]$Params) {
+  $copy = @{}
+  foreach ($key in @($Params.Keys)) { $copy[$key] = $Params[$key] }
+  $copy['$count'] = 'true'
+  $copy['$top'] = '1'
+  $json = Invoke-DlGet (Build-Url $Path $copy)
+  if ($json -and ($json.PSObject.Properties.Name -contains '@odata.count') -and $null -ne $json.'@odata.count') { return [int]$json.'@odata.count' }
+  return @(Get-Rows $json).Count
+}
+function Get-PieceTemplates([string]$ProjectId) {
+  $json = $null
+  try { $json = Invoke-DlGet (Build-Url '/InspectorPieceTemplates' @{ '$filter' = "inspectorProject/id eq $ProjectId"; '$orderby' = 'name' }) } catch { $json = $null }
+  $rows = @(Get-Rows $json)
+  if ($rows.Count -eq 0) {
+    try {
+      $project = Invoke-DlGet ((Get-ApiBase) + "/InspectorProjects/$ProjectId" + '?$expand=inspectorPieceTemplates')
+      if ($project -and $project.inspectorPieceTemplates) {
+        $rows = @()
+        foreach ($row in @($project.inspectorPieceTemplates)) { if ($null -ne $row) { $rows += $row } }
+      }
+    } catch { $rows = @() }
+  }
+  $items = New-List
+  foreach ($row in $rows) {
+    $id = As-Str $row.id
+    if (-not $id) { continue }
+    $count = 0
+    $sample = ''
+    try { $count = Get-ODataCount '/InspectorPieces' @{ '$filter' = "inspectorProject/id eq $ProjectId and inspectorPieceTemplate/id eq $id" } } catch { $count = 0 }
+    try {
+      $one = Invoke-DlGet (Build-Url '/InspectorPieces' @{ '$filter' = "inspectorPieceTemplate/id eq $id"; '$top' = '1'; '$select' = 'id' })
+      foreach ($p in @(Get-Rows $one)) { if (-not $sample) { $sample = As-Str $p.id } }
+    } catch { $sample = '' }
+    [void]$items.Add(@{ id = $id; name = (As-Str $row.name); pieceCount = $count; samplePieceId = $sample })
+  }
+  return @{ items = $items }
+}
+function Get-ProjectPieces([string]$ProjectId, [bool]$Unlinked, [string]$Q, [int]$Top) {
+  if ($Top -lt 1) { $Top = 40 }
+  if ($Top -gt 100) { $Top = 100 }
+  $Q = Normalize-SearchTerm $Q
+  $filter = "inspectorProject/id eq $ProjectId"
+  if ($Unlinked) { $filter = $filter + ' and inspectorPieceTemplate eq null' }
+  if ($Q) { $filter = $filter + " and contains(tolower(name),'$(Esc $Q.ToLower())')" }
+  $json = Invoke-DlGet (Build-Url '/InspectorPieces' @{ '$filter' = $filter; '$orderby' = 'name'; '$top' = [string]$Top; '$select' = 'id,name' })
+  $items = New-List
+  foreach ($row in @(Get-Rows $json)) { [void]$items.Add(@{ id = (As-Str $row.id); name = (As-Str $row.name) }) }
+  return @{ items = $items }
+}
+function Get-PieceModels([string]$PieceId) {
+  $json = Invoke-DlGet ((Get-ApiBase) + "/InspectorPieces/$PieceId/Models")
+  $rows = New-List
+  if ($null -eq $json) { }
+  elseif ($json -is [System.Array]) { foreach ($row in $json) { if ($null -ne $row) { [void]$rows.Add($row) } } }
+  elseif ($json.PSObject.Properties.Name -contains 'value') { foreach ($row in @(Get-Rows $json)) { [void]$rows.Add($row) } }
+  elseif ($json._links -or $json.name) { [void]$rows.Add($json) }
+  $items = New-List
+  foreach ($row in $rows) {
+    $href = ''
+    if ($row._links -and $row._links.obj) { $href = As-Str $row._links.obj.href }
+    if (-not $href) { continue }
+    $hash = (($href -split '/')[-1]).ToLower()
+    $size = Get-ModelSize $hash
+    [void]$items.Add(@{ name = (As-Str $row.name); hash = $hash; sizeBytes = $size })
+  }
+  return @{ items = $items }
+}
+function Convert-Control($c) {
+  $low = $null
+  $up = $null
+  if ($c.tolerance) {
+    if ($null -ne $c.tolerance.low) { $low = $c.tolerance.low }
+    if ($null -ne $c.tolerance.up) { $up = $c.tolerance.up }
+  }
+  $nominal = $null
+  if ($null -ne $c.nominal) { $nominal = $c.nominal }
+  return @{ id = (As-Str $c.id); objectName = (As-Str $c.objectName); name = (As-Str $c.name); type = (As-Str $c.type); nominal = $nominal; tolerances = @{ low = $low; up = $up } }
+}
+function Get-NamedControls([string]$TemplateId, [string]$PieceId) {
+  $items = New-List
+  if ($PieceId) {
+    $json = Invoke-DlGet (Build-Url '/Controls' @{ '$filter' = "inspectorPiece/id eq $PieceId" })
+    foreach ($c in @(Get-Rows $json)) { [void]$items.Add((Convert-Control $c)) }
+    return @{ items = $items }
+  }
+  if (-not $TemplateId) { throw 'templateId oder pieceId fehlt' }
+  $form = Invoke-DlGet ((Get-ApiBase) + "/InspectorPieceTemplates/$TemplateId/Form")
+  $formIds = New-Object System.Collections.Generic.List[string]
+  $nodes = @()
+  if ($form -and $form.controls) { $nodes = @($form.controls) }
+  elseif ($form -and $form.value) { $nodes = @($form.value) }
+  foreach ($node in $nodes) {
+    if ($null -eq $node) { continue }
+    $id = As-Str $node.id
+    if ($id) { [void]$formIds.Add($id) }
+  }
+  $sample = Invoke-DlGet (Build-Url '/InspectorPieces' @{ '$filter' = "inspectorPieceTemplate/id eq $TemplateId"; '$orderby' = 'creationDateUser desc'; '$top' = '1'; '$select' = 'id' })
+  $sampleId = ''
+  foreach ($row in @(Get-Rows $sample)) { if (-not $sampleId) { $sampleId = As-Str $row.id } }
+  $byId = @{}
+  if ($sampleId) {
+    $controls = Invoke-DlGet (Build-Url '/Controls' @{ '$filter' = "inspectorPiece/id eq $sampleId" })
+    foreach ($c in @(Get-Rows $controls)) { $byId[(As-Str $c.id)] = $c }
+  }
+  if ($formIds.Count -eq 0) {
+    foreach ($key in @($byId.Keys)) { [void]$items.Add((Convert-Control $byId[$key])) }
+  } else {
+    foreach ($id in $formIds) {
+      if ($byId.ContainsKey($id)) { [void]$items.Add((Convert-Control $byId[$id])) }
+      else { [void]$items.Add(@{ id = $id; objectName = ''; name = ''; type = ''; nominal = $null; tolerances = @{ low = $null; up = $null } }) }
+    }
+  }
+  return @{ items = $items }
+}
+function Build-PieceFilter([string]$ProjectId, [string]$TemplateId, [string]$From, [string]$To) {
+  $filter = "inspectorProject/id eq $ProjectId"
+  if ($TemplateId) { $filter = $filter + " and inspectorPieceTemplate/id eq $TemplateId" }
+  if ($From -match '^\d{4}-\d{2}-\d{2}$') { $filter = $filter + " and creationDateUser ge ${From}T00:00:00Z" }
+  if ($To -match '^\d{4}-\d{2}-\d{2}$') { $filter = $filter + " and creationDateUser le ${To}T23:59:59Z" }
+  return $filter
 }
 function Load-Settings {
   if (-not (Test-Path $Script:SettingsFile)) { return $false }
   $s = Read-Utf8Text $Script:SettingsFile | ConvertFrom-Json
   if ($s.server) { $Script:HostUrl = [string]$s.server }
   if ($s.pollSeconds) { $Script:PollSeconds = [int]$s.pollSeconds }
-  if ($s.lastPieces) { $Script:LastPieces = [int]$s.lastPieces }
-  if ($s.templateId) { $Script:TemplateId = [string]$s.templateId }
-  if ($s.templateName) { $Script:TemplateName = [string]$s.templateName }
-  if (-not $s.tokenProtected) { return $false }
+  if (-not $s.tokenProtected) { $Script:Token = ''; return $false }
   $sec = ConvertTo-SecureString ([string]$s.tokenProtected)
   $Script:Token = [Runtime.InteropServices.Marshal]::PtrToStringBSTR([Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec))
   return [bool]$Script:Token
@@ -248,21 +322,204 @@ function Load-Settings {
 function Save-Settings {
   $enc = ''
   if ($Script:Token) { $enc = [string](ConvertTo-SecureString $Script:Token -AsPlainText -Force | ConvertFrom-SecureString) }
-  $obj = [pscustomobject]@{ server = $Script:HostUrl; tokenProtected = $enc; pollSeconds = $Script:PollSeconds; lastPieces = $Script:LastPieces; templateId = $Script:TemplateId; templateName = $Script:TemplateName }
+  $obj = [pscustomobject]@{ schemaVersion = 1; server = $Script:HostUrl; tokenProtected = $enc; pollSeconds = $Script:PollSeconds }
   Write-Utf8Text $Script:SettingsFile (ConvertTo-Json -InputObject $obj -Depth 4)
 }
-function Get-RowTag($row) {
-  if ($null -eq $row) { return $null }
-  try { return $row.Tag } catch { return $null }
+function Get-PublicSettings {
+  return @{ server = [string]$Script:HostUrl; tokenSet = [bool]$Script:Token; pollSeconds = [int]$Script:PollSeconds }
+}
+function Has-Field($body, [string]$name) {
+  if ($null -eq $body) { return $false }
+  if ($body -is [System.Collections.IDictionary]) { return $body.Contains($name) }
+  return $null -ne $body.PSObject.Properties[$name]
+}
+function Apply-Settings($body) {
+  if (Has-Field $body 'server') { $Script:HostUrl = (As-Str $body.server).Trim() }
+  if (Has-Field $body 'pollSeconds') {
+    $n = 0
+    if ([int]::TryParse((As-Str $body.pollSeconds), [ref]$n)) {
+      if ($n -lt 5) { $n = 5 }
+      if ($n -gt 3600) { $n = 3600 }
+      $Script:PollSeconds = $n
+    }
+  }
+  if ((Has-Field $body 'token') -and (As-Str $body.token)) { $Script:Token = As-Str $body.token }
+  Save-Settings
+}
+function Model-Path([string]$Hash) { Join-Path (Join-Path $Script:CacheDir 'models') ($Hash.ToLower() + '.obj') }
+function Ensure-ModelFile([string]$Hash) {
+  $Hash = $Hash.ToLower()
+  if ($Hash -notmatch '^[0-9a-f]{8,128}$') { throw 'ungueltiger Hash' }
+  $dest = Model-Path $Hash
+  $folder = Split-Path -Parent $dest
+  if (-not (Test-Path $folder)) { New-Item -ItemType Directory -Path $folder | Out-Null }
+  if (Test-Path -LiteralPath $dest) { return $dest }
+  $url = (Get-ApiBase) + '/Files/' + $Hash
+  $r = [System.Net.HttpWebRequest]::Create($url)
+  $r.Method = 'GET'; $r.Timeout = 180000
+  $r.Headers.Add('Authorization', "Bearer $($Script:Token)")
+  $resp = $r.GetResponse()
+  try {
+    $fs = [IO.File]::Create($dest)
+    $resp.GetResponseStream().CopyTo($fs)
+    $fs.Close()
+  } finally { $resp.Close() }
+  return $dest
+}
+function Read-Query($ctx) {
+  $map = @{}
+  $query = [string]$ctx.Request.Url.Query
+  if ($query.StartsWith('?')) { $query = $query.Substring(1) }
+  foreach ($part in $query.Split('&')) {
+    if (-not $part) { continue }
+    $eq = $part.IndexOf('=')
+    if ($eq -lt 0) { $map[[Uri]::UnescapeDataString($part)] = ''; continue }
+    $k = [Uri]::UnescapeDataString($part.Substring(0, $eq))
+    $v = [Uri]::UnescapeDataString($part.Substring($eq + 1))
+    $map[$k] = $v
+  }
+  return $map
+}
+function Send-Bytes($ctx, [int]$Code, [byte[]]$Bytes, [string]$Type) {
+  $ctx.Response.StatusCode = $Code
+  $ctx.Response.ContentType = $Type
+  if ($Bytes -and $Bytes.Length -gt 0) { $ctx.Response.OutputStream.Write($Bytes, 0, $Bytes.Length) }
+}
+function Send-Text($ctx, [int]$Code, [string]$Text, [string]$Type) {
+  if (-not $Type) { $Type = 'text/plain; charset=utf-8' }
+  Send-Bytes $ctx $Code ([Text.Encoding]::UTF8.GetBytes([string]$Text)) $Type
+}
+function Send-Json($ctx, [int]$Code, $Obj) {
+  $ctx.Response.Headers['Cache-Control'] = 'no-store'
+  Send-Text $ctx $Code (ConvertTo-PlainJson $Obj) 'application/json; charset=utf-8'
+}
+function Handle-Api($ctx, [string]$Method, [string]$Path) {
+  if ($Path -eq '/api/version' -and $Method -eq 'GET') { Send-Json $ctx 200 @{ name = 'DL-Merkmal-Viewer'; version = $Script:Version }; return }
+  if ($Path -eq '/api/settings') {
+    if ($Method -eq 'GET') { Send-Json $ctx 200 (Get-PublicSettings); return }
+    if ($Method -eq 'POST') {
+      $reader = New-Object IO.StreamReader($ctx.Request.InputStream, [Text.Encoding]::UTF8)
+      $raw = $reader.ReadToEnd(); $reader.Close()
+      $body = $null
+      if ($raw) { $body = $raw | ConvertFrom-Json }
+      Apply-Settings $body
+      Send-Json $ctx 200 (Get-PublicSettings)
+      return
+    }
+  }
+  $q = Read-Query $ctx
+  if ($Path -eq '/api/projects' -and $Method -eq 'GET') {
+    $top = 20; $skip = 0
+    if ($q.Contains('top')) { [void][int]::TryParse([string]$q['top'], [ref]$top) }
+    if ($q.Contains('skip')) { [void][int]::TryParse([string]$q['skip'], [ref]$skip) }
+    $nameQ = ''; $ws = ''
+    if ($q.Contains('q')) { $nameQ = [string]$q['q'] }
+    if ($q.Contains('workspace')) { $ws = [string]$q['workspace'] }
+    Send-Json $ctx 200 (Get-ProjectPage $nameQ $ws $top $skip)
+    return
+  }
+  if ($Path -match '^/api/projects/([^/]+)/templates$' -and $Method -eq 'GET') {
+    Send-Json $ctx 200 (Get-PieceTemplates ([Uri]::UnescapeDataString($Matches[1])))
+    return
+  }
+  if ($Path -match '^/api/projects/([^/]+)/pieces$' -and $Method -eq 'GET') {
+    $top = 40
+    if ($q.Contains('top')) { [void][int]::TryParse([string]$q['top'], [ref]$top) }
+    $unlinked = $false
+    if ($q.Contains('unlinked') -and [string]$q['unlinked'] -eq '1') { $unlinked = $true }
+    $nameQ = ''
+    if ($q.Contains('q')) { $nameQ = [string]$q['q'] }
+    Send-Json $ctx 200 (Get-ProjectPieces ([Uri]::UnescapeDataString($Matches[1])) $unlinked $nameQ $top)
+    return
+  }
+  if ($Path -match '^/api/pieces/([^/]+)/models$' -and $Method -eq 'GET') {
+    Send-Json $ctx 200 (Get-PieceModels ([Uri]::UnescapeDataString($Matches[1])))
+    return
+  }
+  if ($Path -match '^/api/models/([0-9a-fA-F]+)$' -and $Method -eq 'GET') {
+    $hash = $Matches[1].ToLower()
+    $file = Ensure-ModelFile $hash
+    $ctx.Response.StatusCode = 200
+    $ctx.Response.ContentType = 'model/obj'
+    $ctx.Response.Headers['Cache-Control'] = 'public, max-age=86400'
+    $fs = [IO.File]::OpenRead($file)
+    try { $fs.CopyTo($ctx.Response.OutputStream) } finally { $fs.Close() }
+    return
+  }
+  if ($Path -eq '/api/controls' -and $Method -eq 'GET') {
+    $templateId = ''; $pieceId = ''
+    if ($q.Contains('templateId')) { $templateId = [string]$q['templateId'] }
+    if ($q.Contains('pieceId')) { $pieceId = [string]$q['pieceId'] }
+    Send-Json $ctx 200 (Get-NamedControls $templateId $pieceId)
+    return
+  }
+  Send-Json $ctx 404 @{ error = 'nicht gefunden' }
+}
+function Handle-Request($ctx) {
+  $path = [string]$ctx.Request.Url.AbsolutePath
+  $method = [string]$ctx.Request.HttpMethod
+  if ($path -eq '/' -or $path -eq '') { $path = '/index.html' }
+  if ($path.StartsWith('/api/')) {
+    if (-not $ctx.Request.IsLocal) { Send-Text $ctx 403 'nur localhost' 'text/plain; charset=utf-8'; return }
+    Handle-Api $ctx $method $path
+    return
+  }
+  $rel = $path.TrimStart('/')
+  if ($rel.Contains('..') -or -not $Script:Www) { $ctx.Response.StatusCode = 400; return }
+  $full = [IO.Path]::GetFullPath((Join-Path $Script:Www ($rel -replace '/', '\')))
+  $root = [IO.Path]::GetFullPath($Script:Www)
+  if (-not $root.EndsWith('\')) { $root += '\' }
+  if ($full.StartsWith($root) -and (Test-Path -LiteralPath $full -PathType Leaf)) {
+    $ext = [IO.Path]::GetExtension($full).ToLowerInvariant()
+    $type = 'application/octet-stream'
+    if ($ext -eq '.html') { $type = 'text/html; charset=utf-8' }
+    elseif ($ext -eq '.js') { $type = 'text/javascript; charset=utf-8' }
+    elseif ($ext -eq '.css') { $type = 'text/css; charset=utf-8' }
+    elseif ($ext -eq '.json') { $type = 'application/json; charset=utf-8' }
+    elseif ($ext -eq '.obj') { $type = 'model/obj' }
+    $ctx.Response.StatusCode = 200
+    $ctx.Response.ContentType = $type
+    $buf = [IO.File]::ReadAllBytes($full)
+    $ctx.Response.OutputStream.Write($buf, 0, $buf.Length)
+  } else { $ctx.Response.StatusCode = 404 }
+}
+function Ensure-Dirs {
+  foreach ($rel in @('', 'views', 'cache', 'cache\models', 'cache\www', 'logs')) {
+    $p = if ($rel) { Join-Path $Script:AppDir $rel } else { $Script:AppDir }
+    if (-not (Test-Path $p)) { New-Item -ItemType Directory -Path $p | Out-Null }
+  }
+}
+function Install-Self {
+  Ensure-Dirs
+  $src = $env:DL_LAUNCH
+  if (-not $src -or -not (Test-Path -LiteralPath $src)) { return }
+  $dest = Join-Path $Script:AppDir 'DL-Merkmal-Viewer.cmd'
+  if ([IO.Path]::GetFullPath($src) -eq [IO.Path]::GetFullPath($dest)) { return }
+  Copy-Item -LiteralPath $src -Destination $dest -Force
+}
+function Find-BundleRoot {
+  $launch = $env:DL_LAUNCH
+  if (-not $launch) { return '' }
+  $dir = Split-Path -Parent $launch
+  $parent = Split-Path -Parent $dir
+  if ($parent -and (Test-Path (Join-Path $parent 'index.html'))) { return $parent }
+  if (Test-Path (Join-Path $dir 'index.html')) { return $dir }
+  return ''
 }
 function Ensure-Cache {
-  if (-not (Test-Path $Script:CacheDir)) { New-Item -ItemType Directory -Path $Script:CacheDir | Out-Null }
   $web = Join-Path $Script:CacheDir 'www'
   if (-not (Test-Path $web)) { New-Item -ItemType Directory -Path $web | Out-Null }
+  $bundle = Find-BundleRoot
   foreach ($rel in $Script:StaticFiles) {
     $dest = Join-Path $web ($rel -replace '/', [IO.Path]::DirectorySeparatorChar)
     $folder = Split-Path -Parent $dest
     if (-not (Test-Path $folder)) { New-Item -ItemType Directory -Path $folder | Out-Null }
+    $copied = $false
+    if ($bundle) {
+      $src = Join-Path $bundle ($rel -replace '/', [IO.Path]::DirectorySeparatorChar)
+      if (Test-Path -LiteralPath $src) { Copy-Item -LiteralPath $src -Destination $dest -Force; $copied = $true }
+    }
+    if ($copied) { continue }
     try {
       $url = $Script:Pages.TrimEnd('/') + '/' + $rel
       $req = [System.Net.HttpWebRequest]::Create($url)
@@ -275,358 +532,64 @@ function Ensure-Cache {
       if (-not (Test-Path $dest)) { throw "Seite nicht geladen: $rel" }
     }
   }
-  $Script:Sync.Www = $web
+  $Script:Www = $web
 }
-function Get-ControlId($c) {
-  $obj = As-Str $c.objectName
-  $name = As-Str $c.name
-  if ($obj) { return "$obj / $name" }
-  return $name
-}
-function Get-Limits($c) {
-  $low = 0.0; $up = 0.0
-  if ($c.tolerance) { $low = [double]$c.tolerance.low; $up = [double]$c.tolerance.up }
-  if ($null -eq $c.nominal) { return @{ nominal = 0.0; usl = $up; lsl = $low } }
-  $n = [double]$c.nominal
-  return @{ nominal = $n; usl = ($n + $up); lsl = ($n + $low) }
-}
-function Unit-Of($c) {
-  $u = ''
-  if ($c.units) { $u = As-Str $c.units.length }
-  if ($u -eq 'Millimeters') { return 'mm' }
-  if ($u -eq 'Inches') { return 'in' }
-  return 'mm'
-}
-function Update-LiveData([string]$ProjectId) {
-  if (-not $ProjectId) { return }
-  $top = $Script:LastPieces
-  if ($Script:Sync.WantTop) { $parsedTop = 0; if ([int]::TryParse([string]$Script:Sync.WantTop, [ref]$parsedTop) -and $parsedTop -gt 0) { $top = $parsedTop } }
-  $from = [string]$Script:Sync.WantFrom
-  $to = [string]$Script:Sync.WantTo
-  $filter = Build-PieceFilter $ProjectId $Script:TemplateId $from $to
-  $pieces = @(Get-DlAll '/InspectorPieces' @{
-    '$filter' = $filter
-    '$orderby' = 'creationDateUser desc'
-    '$top' = [string]$top
-    '$select' = 'id,name,creationDateUser,userProperties'
-  })
-  if ($pieces.Count -gt 0) { Update-LiveModel (As-Str $pieces[0].id) }
-  $ordered = @()
-  for ($i = $pieces.Count - 1; $i -ge 0; $i--) { $ordered += $pieces[$i] }
-  $byId = @{}
-  $features = @{}
-  foreach ($piece in $ordered) {
-    $pid = As-Str $piece.id
-    if (-not $Script:PieceCache.Contains($pid)) {
-      $controls = @(Get-DlAll '/Controls' @{ '$filter' = "inspectorPiece/id eq $pid" })
-      $objects = @()
-      try { $objects = @(Get-DlAll '/MeasurementObjects' @{ '$filter' = "inspectorPiece/id eq $pid" }) } catch { $objects = @() }
-      $Script:PieceCache[$pid] = @{ controls = $controls; features = $objects }
-    }
-    $entry = $Script:PieceCache[$pid]
-    foreach ($f in @($entry.features)) { $features[(As-Str $f.name)] = As-Str $f.type }
-    foreach ($c in @($entry.controls)) {
-      $id = Get-ControlId $c
-      if (-not $byId.Contains($id)) {
-        $lim = Get-Limits $c
-        $byId[$id] = @{
-          id = $id; name = $id; objectName = As-Str $c.objectName; controlName = As-Str $c.name
-          displayName = As-Str $c.displayName; unit = (Unit-Of $c)
-          nominal = $lim.nominal; usl = $lim.usl; lsl = $lim.lsl; measurements = @()
-        }
-      }
-      if ($null -eq $c.measured) { continue }
-      $stamp = As-Str $c.measurementDateTime
-      if (-not $stamp) { $stamp = As-Str $piece.creationDateUser }
-      $props = @{}
-      if ($piece.userProperties) {
-        foreach ($prop in $piece.userProperties.PSObject.Properties) { $props[$prop.Name] = As-Str $prop.Value }
-      }
-      $meas = @{ pieceId = $pid; pieceName = As-Str $piece.name; value = [double]$c.measured; timestamp = $stamp; creationDateUser = (As-Str $piece.creationDateUser); userProperties = $props }
-      if ($c.test) { $meas.test = As-Str $c.test }
-      $byId[$id].measurements = @($byId[$id].measurements) + @($meas)
-    }
-  }
-  $chars = @()
-  foreach ($k in @($byId.Keys)) { $chars += $byId[$k] }
-  $pieceOut = @()
-  foreach ($p in $ordered) { $pieceOut += @{ id = As-Str $p.id; name = As-Str $p.name; timestamp = As-Str $p.creationDateUser } }
-  $featOut = @()
-  foreach ($k in @($features.Keys)) { $featOut += @{ name = $k; type = [string]$features[$k] } }
-  $doc = @{
-    schemaVersion = 1; source = 'live'; refreshSeconds = $Script:PollSeconds
-    fetchedAt = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
-    part = @{ id = $ProjectId; name = $ProjectId; template = @{ id = [string]$Script:TemplateId; name = [string]$Script:TemplateName } }
-    pieces = @($pieceOut); features = @($featOut); characteristics = @($chars)
-  }
-  $Script:Sync.LiveJson = ConvertTo-PlainJson $doc
-  $tpl = [string]$Script:TemplateName
-  if (-not $tpl) { $tpl = [string]$Script:TemplateId }
-  if ($tpl) { $Script:Sync.Status = "Live $(Get-Date -Format 'HH:mm:ss')  ($($pieces.Count) Teile, $tpl)" }
-  else { $Script:Sync.Status = "Live $(Get-Date -Format 'HH:mm:ss')  ($($pieces.Count) Teile)" }
-}
-function Update-LiveModel([string]$PieceId) {
-  if (-not $PieceId) { return }
-  $json = Invoke-DlGet ((Get-ApiBase) + "/InspectorPieces/$PieceId/Models")
-  $href = $null
-  if ($json._links -and $json._links.obj) { $href = As-Str $json._links.obj.href }
-  if (-not $href) {
-    foreach ($item in @($json.value)) {
-      if ($item._links -and $item._links.obj) { $href = As-Str $item._links.obj.href; break }
-    }
-  }
-  if (-not $href) { return }
-  $hash = ($href -split '/')[-1]
-  $dest = Join-Path (Join-Path $Script:CacheDir 'models') $hash
-  $folder = Split-Path -Parent $dest
-  if (-not (Test-Path $folder)) { New-Item -ItemType Directory -Path $folder | Out-Null }
-  if (-not (Test-Path $dest)) {
-    $url = $href
-    if ($href.StartsWith('/v2/')) { $url = (Get-ApiBase) + $href.Substring(3) }
-    elseif ($href.StartsWith('/')) { $url = ($Script:HostUrl.TrimEnd('/')) + $href }
-    $req = [System.Net.HttpWebRequest]::Create($url)
-    $req.Method = 'GET'; $req.Timeout = 180000
-    $req.Headers.Add('Authorization', "Bearer $($Script:Token)")
-    $resp = $req.GetResponse()
-    $fs = [IO.File]::Create($dest)
-    $resp.GetResponseStream().CopyTo($fs)
-    $fs.Close(); $resp.Close()
-  }
-  $Script:Sync.ModelPath = $dest
-}
-function Start-HttpServer {
-  $prefix = 'http://localhost:8765/'
-  $ps = [powershell]::Create()
-  $rs = [runspacefactory]::CreateRunspace()
-  $rs.Open(); $ps.Runspace = $rs
-  [void]$ps.AddScript({
-    param($Sync, $Prefix)
-    $listener = New-Object System.Net.HttpListener
-    $listener.Prefixes.Add($Prefix)
-    $listener.Start()
-    while (-not $Sync.Stop) {
-      $async = $listener.BeginGetContext($null, $null)
-      if (-not $async.AsyncWaitHandle.WaitOne(500)) { continue }
-      $ctx = $null
-      try { $ctx = $listener.EndGetContext($async) } catch { continue }
-      try {
-        $path = $ctx.Request.Url.AbsolutePath
-        $www = [string]$Sync.Www
-        if ($path -eq '/' -or $path -eq '') { $path = '/index.html' }
-        if ($path -eq '/data/live-measurements.json') {
-          $query = [string]$ctx.Request.Url.Query
-          if ($query.StartsWith('?')) { $query = $query.Substring(1) }
-          foreach ($part in $query.Split('&')) {
-            if (-not $part) { continue }
-            $bits = $part.Split('=')
-            $qk = [Uri]::UnescapeDataString($bits[0])
-            $qv = ''
-            if ($bits.Length -gt 1) { $qv = [Uri]::UnescapeDataString($bits[1]) }
-            if ($qk -eq 'top') { $Sync.WantTop = $qv }
-            elseif ($qk -eq 'from') { $Sync.WantFrom = $qv }
-            elseif ($qk -eq 'to') { $Sync.WantTo = $qv }
-          }
-          $text = [string]$Sync.LiveJson
-          if (-not $text) { $text = '{"error":"noch keine Live-Daten"}'; $ctx.Response.StatusCode = 404 } else { $ctx.Response.StatusCode = 200 }
-          $bytes = [Text.Encoding]::UTF8.GetBytes($text)
-          $ctx.Response.ContentType = 'application/json; charset=utf-8'
-          $ctx.Response.Headers['Cache-Control'] = 'no-store'
-          $ctx.Response.OutputStream.Write($bytes, 0, $bytes.Length)
-        } elseif ($path -eq '/models/live.obj') {
-          $model = [string]$Sync.ModelPath
-          if (-not $model -or -not (Test-Path -LiteralPath $model)) { $ctx.Response.StatusCode = 404; $buf = [Text.Encoding]::UTF8.GetBytes('kein Modell') }
-          else { $ctx.Response.StatusCode = 200; $buf = [IO.File]::ReadAllBytes($model) }
-          $ctx.Response.ContentType = 'text/plain; charset=utf-8'
-          $ctx.Response.OutputStream.Write($buf, 0, $buf.Length)
-        } else {
-          $rel = $path.TrimStart('/')
-          if ($rel.Contains('..')) { $ctx.Response.StatusCode = 400 }
-          else {
-            $full = [IO.Path]::GetFullPath((Join-Path $www ($rel -replace '/', '\')))
-            $root = [IO.Path]::GetFullPath($www)
-            if (-not $root.EndsWith('\')) { $root += '\' }
-            if ($full.StartsWith($root) -and (Test-Path -LiteralPath $full -PathType Leaf)) {
-              $ctx.Response.StatusCode = 200
-              $ext = [IO.Path]::GetExtension($full).ToLowerInvariant()
-              $type = 'application/octet-stream'
-              if ($ext -eq '.html') { $type = 'text/html; charset=utf-8' }
-              elseif ($ext -eq '.js') { $type = 'text/javascript; charset=utf-8' }
-              elseif ($ext -eq '.css') { $type = 'text/css; charset=utf-8' }
-              elseif ($ext -eq '.json') { $type = 'application/json; charset=utf-8' }
-              elseif ($ext -eq '.obj') { $type = 'text/plain; charset=utf-8' }
-              $ctx.Response.ContentType = $type
-              $buf = [IO.File]::ReadAllBytes($full)
-              $ctx.Response.OutputStream.Write($buf, 0, $buf.Length)
-            } else { $ctx.Response.StatusCode = 404 }
-          }
-        }
-      } catch { try { $ctx.Response.StatusCode = 500 } catch {} }
-      finally { try { $ctx.Response.OutputStream.Close() } catch {} }
-    }
-    $listener.Stop(); $listener.Close()
-  }).AddArgument($Script:Sync).AddArgument('http://localhost:8765/')
-  $Script:ServerHandle = $ps.BeginInvoke()
-  $Script:ServerPower = $ps
-}
-function Show-FirstRun {
+function Show-Status {
   Add-Type -AssemblyName System.Windows.Forms
   Add-Type -AssemblyName System.Drawing
   $f = New-Object Windows.Forms.Form
-  $f.Text = 'DL-Merkmal-Viewer'
+  $f.Text = "DL-Merkmal-Viewer $($Script:Version)"
   $f.FormBorderStyle = 'FixedDialog'
   $f.StartPosition = 'CenterScreen'
-  $f.ClientSize = New-Object Drawing.Size(480, 180)
+  $f.ClientSize = New-Object Drawing.Size(420, 150)
   $f.MaximizeBox = $false
-  $l1 = New-Object Windows.Forms.Label -Property @{ Text = 'Server-URL'; Left = 12; Top = 12; Width = 440 }
-  $t1 = New-Object Windows.Forms.TextBox -Property @{ Left = 12; Top = 32; Width = 440; Text = $Script:HostUrl }
-  $l2 = New-Object Windows.Forms.Label -Property @{ Text = 'Personal Access Token'; Left = 12; Top = 64; Width = 440 }
-  $t2 = New-Object Windows.Forms.TextBox -Property @{ Left = 12; Top = 84; Width = 440; UseSystemPasswordChar = $true }
-  $ok = New-Object Windows.Forms.Button -Property @{ Text = 'Weiter'; Left = 270; Top = 130; Width = 80; DialogResult = 'OK' }
-  $cancel = New-Object Windows.Forms.Button -Property @{ Text = 'Abbrechen'; Left = 360; Top = 130; Width = 90; DialogResult = 'Cancel' }
-  $f.Controls.AddRange(@($l1,$t1,$l2,$t2,$ok,$cancel)); $f.AcceptButton = $ok; $f.CancelButton = $cancel
-  if ($f.ShowDialog() -ne 'OK') { return $false }
-  $Script:HostUrl = $t1.Text.Trim()
-  if ($t2.Text) { $Script:Token = $t2.Text }
-  return [bool]($Script:HostUrl -and $Script:Token)
-}
-function Show-Main {
-  Add-Type -AssemblyName System.Windows.Forms
-  Add-Type -AssemblyName System.Drawing
-  $f = New-Object Windows.Forms.Form
-  $f.Text = 'DL-Merkmal-Viewer'
-  $f.StartPosition = 'CenterScreen'
-  $f.ClientSize = New-Object Drawing.Size(760, 720)
-  $f.Font = New-Object Drawing.Font('Segoe UI', 9)
-  $bar = New-Object Windows.Forms.FlowLayoutPanel -Property @{ Dock = 'Top'; Height = 40; Padding = '6,6,6,0' }
-  $txt = New-Object Windows.Forms.TextBox -Property @{ Width = 220 }
-  $mode = New-Object Windows.Forms.ComboBox -Property @{ Width = 120; DropDownStyle = 'DropDownList' }
-  [void]$mode.Items.AddRange(@('Projekt','Workspace')); $mode.SelectedIndex = 0
-  $search = New-Object Windows.Forms.Button -Property @{ Text = 'Suchen'; Width = 90 }
-  $bar.Controls.AddRange(@($txt,$mode,$search))
-  $grid = New-Object Windows.Forms.DataGridView -Property @{ Dock = 'Fill'; ReadOnly = $true; AllowUserToAddRows = $false; SelectionMode = 'FullRowSelect'; MultiSelect = $false; RowHeadersVisible = $false; AutoSizeColumnsMode = 'Fill'; BackgroundColor = 'White' }
-  [void]$grid.Columns.Add('Stern','')
-  [void]$grid.Columns.Add('Projekt','Projekt')
-  [void]$grid.Columns.Add('Workspace','Workspace')
-  $grid.Columns[0].FillWeight = 20
-  $bottom = New-Object Windows.Forms.Panel -Property @{ Dock = 'Bottom'; Height = 330 }
-  $watched = New-Object Windows.Forms.Label -Property @{ Left = 12; Top = 8; Width = 720; Text = 'Beobachtet: (noch keins)' }
-  $tplLabel = New-Object Windows.Forms.Label -Property @{ Left = 12; Top = 28; Width = 430; Text = 'Stueckvorlage' }
-  $tplGrid = New-Object Windows.Forms.DataGridView -Property @{ Left = 12; Top = 48; Width = 430; Height = 110; ReadOnly = $true; AllowUserToAddRows = $false; SelectionMode = 'FullRowSelect'; MultiSelect = $false; RowHeadersVisible = $false; AutoSizeColumnsMode = 'Fill'; BackgroundColor = 'White' }
-  [void]$tplGrid.Columns.Add('Wahl','')
-  [void]$tplGrid.Columns.Add('Name','Vorlage')
-  [void]$tplGrid.Columns.Add('Teile','Teile')
-  $tplGrid.Columns[0].FillWeight = 18
-  $ctrlLabel = New-Object Windows.Forms.Label -Property @{ Left = 452; Top = 28; Width = 290; Text = 'Merkmale (Objekt / Name)' }
-  $ctrlList = New-Object Windows.Forms.ListBox -Property @{ Left = 452; Top = 48; Width = 290; Height = 110 }
-  $interval = New-Object Windows.Forms.ComboBox -Property @{ Left = 12; Top = 170; Width = 140; DropDownStyle = 'DropDownList' }
-  [void]$interval.Items.AddRange(@('30 s','1 min','5 min','15 min'))
-  $map = @{ 30 = 0; 60 = 1; 300 = 2; 900 = 3 }
-  if ($map.ContainsKey($Script:PollSeconds)) { $interval.SelectedIndex = $map[$Script:PollSeconds] } else { $interval.SelectedIndex = 1 }
-  $open = New-Object Windows.Forms.Button -Property @{ Text = 'Im Browser oeffnen'; Left = 170; Top = 168; Width = 160 }
-  $snippet = New-Object Windows.Forms.TextBox -Property @{ Left = 12; Top = 208; Width = 560; ReadOnly = $true; Text = '<iframe src="http://localhost:8765/" title="Milkyway Merkmale"></iframe>' }
-  $copy = New-Object Windows.Forms.Button -Property @{ Text = 'Kopieren'; Left = 580; Top = 206; Width = 90 }
-  $status = New-Object Windows.Forms.Label -Property @{ Left = 12; Top = 246; Width = 720; Height = 70; Text = 'Bereit' }
-  $bottom.Controls.AddRange(@($watched,$tplLabel,$tplGrid,$ctrlLabel,$ctrlList,$interval,$open,$snippet,$copy,$status))
-  $f.Controls.Add($grid); $f.Controls.Add($bottom); $f.Controls.Add($bar)
-  $renderStars = {
-    $cur = Load-Watched
-    $id = $(if ($cur) { As-Str $cur.projectId } else { '' })
-    foreach ($row in $grid.Rows) {
-      $tag = Get-RowTag $row
-      $on = $tag -and ((As-Str $tag.projectId) -eq $id)
-      $row.Cells[0].Value = $(if ($on) { [string]([char]0x2605) } else { [string]([char]0x2606) })
-    }
-    if ($cur) { $watched.Text = "Beobachtet: $($cur.workspaceName) / $($cur.projectName)" } else { $watched.Text = 'Beobachtet: (noch keins)' }
-  }
-  $markTemplate = {
-    foreach ($row in $tplGrid.Rows) {
-      $tag = Get-RowTag $row
-      $on = $tag -and ((As-Str $tag.id) -eq [string]$Script:TemplateId)
-      $row.Cells[0].Value = $(if ($on) { '*' } else { '' })
-    }
-  }
-  $applyTemplate = {
-    param($tag)
-    if ($null -eq $tag) { return }
-    $Script:TemplateId = As-Str $tag.id
-    $Script:TemplateName = As-Str $tag.name
-    Save-Settings
-    & $markTemplate
-    $ctrlList.Items.Clear()
-    try {
-      $names = @(Get-TemplateControlNames (As-Str (Load-Watched).projectId) $Script:TemplateId)
-      foreach ($name in $names) { if ($name) { [void]$ctrlList.Items.Add([string]$name) } }
-      $status.Text = "$($Script:TemplateName): $($names.Count) Merkmale, $($tag.pieceCount) Teile"
-    } catch { $status.Text = $_.Exception.Message }
-    $cur = Load-Watched
-    if ($cur) { try { Update-LiveData (As-Str $cur.projectId); $status.Text = [string]$Script:Sync.Status } catch { $status.Text = $_.Exception.Message } }
-  }
-  $loadTemplates = {
-    $tplGrid.Rows.Clear()
-    $ctrlList.Items.Clear()
-    $cur = Load-Watched
-    if (-not $cur) { return }
-    try {
-      $status.Text = 'Vorlagen ...'
-      $templates = @(Get-PieceTemplates (As-Str $cur.projectId))
-      $pick = $null
-      $best = -1
-      foreach ($template in $templates) {
-        $i = $tplGrid.Rows.Add('', (As-Str $template.name), [string]$template.pieceCount)
-        $tplGrid.Rows[$i].Tag = $template
-        if ((As-Str $template.id) -eq [string]$Script:TemplateId) { $pick = $template }
-        if ([int]$template.pieceCount -gt $best) { $best = [int]$template.pieceCount; if (-not $pick) { $pick = $template } }
-      }
-      if ($pick) { & $applyTemplate $pick } else { $status.Text = 'Keine Stueckvorlage' }
-    } catch { $status.Text = $_.Exception.Message }
-  }
-  $search.Add_Click({
-    try {
-      $status.Text = 'Suche ...'
-      $grid.Rows.Clear()
-      $rows = @(Search-Projects $(if ($mode.SelectedIndex -eq 1) { 'Workspace' } else { 'Projekt' }) $txt.Text)
-      foreach ($p in $rows) {
-        $i = $grid.Rows.Add([string]([char]0x2606), (As-Str $p.projectName), (As-Str $p.workspaceName))
-        $grid.Rows[$i].Tag = $p
-      }
-      & $renderStars
-      $status.Text = "$($rows.Count) Projekte"
-    } catch { $status.Text = $_.Exception.Message }
-  })
-  $grid.Add_CellClick({
-    if ($_.RowIndex -lt 0) { return }
-    $row = $grid.Rows[$_.RowIndex]
-    $tag = Get-RowTag $row
-    if ($null -eq $tag) { return }
-    Save-Watched $tag
-    & $renderStars
-    & $loadTemplates
-  })
-  $tplGrid.Add_CellClick({
-    if ($_.RowIndex -lt 0) { return }
-    $tag = Get-RowTag $tplGrid.Rows[$_.RowIndex]
-    if ($null -eq $tag) { return }
-    & $applyTemplate $tag
-  })
-  $interval.Add_SelectedIndexChanged({
-    $Script:PollSeconds = @(30,60,300,900)[$interval.SelectedIndex]
-    Save-Settings
-  })
+  $label = New-Object Windows.Forms.Label -Property @{ Left = 12; Top = 12; Width = 390; Height = 48; Text = "Version $($Script:Version). Einstellungen, Projekt und Merkmale stehen im Browser." }
+  $open = New-Object Windows.Forms.Button -Property @{ Text = 'Im Browser oeffnen'; Left = 12; Top = 70; Width = 160 }
+  $quit = New-Object Windows.Forms.Button -Property @{ Text = 'Beenden'; Left = 180; Top = 70; Width = 100 }
+  $f.Controls.AddRange(@($label, $open, $quit))
   $open.Add_Click({ Start-Process 'http://localhost:8765/' })
-  $copy.Add_Click({ [Windows.Forms.Clipboard]::SetText($snippet.Text); $status.Text = 'iframe kopiert' })
-  $timer = New-Object Windows.Forms.Timer
-  $timer.Interval = [Math]::Max(5000, $Script:PollSeconds * 1000)
-  $timer.Add_Tick({
-    $cur = Load-Watched
-    if (-not $cur) { return }
-    try { Update-LiveData (As-Str $cur.projectId); $status.Text = [string]$Script:Sync.Status } catch { $status.Text = $_.Exception.Message }
-  })
-  $timer.Start()
-  $f.Add_FormClosed({ $Script:Sync.Stop = $true; $timer.Stop() })
-  $cur = Load-Watched
-  if ($cur) { & $loadTemplates }
-  & $renderStars
-  [void]$f.ShowDialog()
+  $quit.Add_Click({ $Script:Stop = $true; $f.Close() })
+  $f.Add_FormClosed({ $Script:Stop = $true })
+  $f.Show()
+  return $f
+}
+function Start-ServerLoop {
+  $listener = New-Object System.Net.HttpListener
+  $listener.Prefixes.Add('http://localhost:8765/')
+  $listener.Start()
+  $form = Show-Status
+  if (-not $env:DL_NO_BROWSER) { Start-Process 'http://localhost:8765/' }
+  while (-not $Script:Stop) {
+    [Windows.Forms.Application]::DoEvents()
+    $async = $listener.BeginGetContext($null, $null)
+    while (-not $async.IsCompleted -and -not $Script:Stop) {
+      [Windows.Forms.Application]::DoEvents()
+      if ($async.AsyncWaitHandle.WaitOne(40)) { break }
+    }
+    if ($Script:Stop -or -not $async.IsCompleted) { continue }
+    $ctx = $null
+    try { $ctx = $listener.EndGetContext($async) } catch { continue }
+    try { Handle-Request $ctx } catch { Write-Log $_.Exception.Message; try { Send-Json $ctx 500 @{ error = 'Fehler' } } catch {} }
+    finally { try { $ctx.Response.OutputStream.Close() } catch {} }
+  }
+  $listener.Stop(); $listener.Close()
+  if ($form) { $form.Dispose() }
+}
+function Get-MockBody([string]$Url) {
+  $Url = [Uri]::UnescapeDataString($Url)
+  if ($Url -match '/InspectorPieceTemplates/.+/Form') { return '{"controls":[{"id":"ctl-1"},{"id":"ctl-2"}]}' }
+  if ($Url -match 'InspectorPieceTemplates') { return '{"value":[{"id":"tpl-1","name":"Stand B"}]}' }
+  if ($Url -match 'InspectorProjects' -and $Url -match 'expand=inspectorPieceTemplates') { return '{"id":"proj-beta","inspectorPieceTemplates":[]}' }
+  if ($Url -match 'InspectorProjects' -and $Url -match 'proj-beta') { return '{"value":[]}' }
+  if ($Url -match 'InspectorProjects') { return '{"@odata.count":1,"value":[{"id":"proj-alpha","name":"Projekt Alpha","workspace":{"id":"ws-1","name":"Arbeitsbereich Eins"}}]}' }
+  if ($Url -match '\$count=true') { return '{"@odata.count":4,"value":[{"id":"piece-a"}]}' }
+  if ($Url -match '/Models') { return '[{"name":"Gehaeuse.prt","_links":{"obj":{"href":"/v2/Files/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","type":"model/obj"}}},{"name":"Deckel.prt","_links":{"obj":{"href":"/v2/Files/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","type":"model/obj"}}},{"name":"Deckel Kopie.prt","_links":{"obj":{"href":"/v2/Files/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","type":"model/obj"}}}]' }
+  if ($Url -match 'inspectorPieceTemplate eq null') { return '{"value":[{"id":"piece-loose","name":"Teil Ohne Vorlage"}]}' }
+  if ($Url -match 'inspectorPieceTemplate/id eq tpl-1' -and $Url -match '\$select=id') { return '{"value":[{"id":"piece-a"}]}' }
+  if ($Url -match 'inspectorPiece/id eq piece-loose') { return '{"value":[{"id":"ctl-9","objectName":"Flaeche","name":"Ebenheit","type":"Flatness","nominal":0,"tolerance":{"low":0,"up":0.05}}]}' }
+  if ($Url -match 'inspectorPiece/id eq piece-a') { return '{"value":[{"id":"ctl-1","objectName":"Objekt 1","name":"Merkmal A","type":"Distance","nominal":10,"tolerance":{"low":-0.1,"up":0.2}},{"id":"ctl-2","objectName":"Objekt 2","name":"Merkmal B","type":"Angle","nominal":90,"tolerance":{"low":-0.5,"up":0.5}}]}' }
+  if ($Url -match 'InspectorPieces') { return '{"value":[]}' }
+  return '{"value":[]}'
 }
 function Invoke-SelfTest {
   $launch = $env:DL_LAUNCH
@@ -640,70 +603,87 @@ function Invoke-SelfTest {
   }
   $json = ConvertTo-JsonArray @([pscustomobject]@{ projectId = 'p1'; projectName = 'Eins'; workspaceId = 'w'; workspaceName = 'WS' })
   if ($json -notmatch '^\[') { throw 'Array erwartet' }
-  $two = ConvertTo-JsonArray @(
-    [pscustomobject]@{ projectId = 'p1'; projectName = 'Eins'; workspaceId = 'w'; workspaceName = 'WS' }
-    [pscustomobject]@{ projectId = 'p2'; projectName = 'Zwei'; workspaceId = 'w'; workspaceName = 'WS' }
-  )
-  if ($two -notmatch '^\[') { throw 'Zwei Eintraege muessen ein Array sein' }
-  $dir = Join-Path ([IO.Path]::GetTempPath()) ('dl-merkmal-' + [guid]::NewGuid().ToString('N'))
-  New-Item -ItemType Directory -Path $dir | Out-Null
-  $www = Join-Path $dir 'www'
-  New-Item -ItemType Directory -Path $www | Out-Null
-  [IO.File]::WriteAllText((Join-Path $www 'index.html'), '<html><title>Merkmale</title></html>')
-  $sync = [hashtable]::Synchronized(@{ LiveJson = '{"source":"live","characteristics":[]}'; ModelPath = ''; Www = $www; Stop = $false })
-  $listener = New-Object System.Net.HttpListener
-  $listener.Prefixes.Add('http://127.0.0.1:8777/')
-  $listener.Start()
-  $client = New-Object System.Net.Http.HttpClient
-  $task = $client.GetAsync('http://127.0.0.1:8777/index.html')
-  $ctx = $listener.GetContext()
-  $bytes = [IO.File]::ReadAllBytes((Join-Path $www 'index.html'))
-  $ctx.Response.StatusCode = 200
-  $ctx.Response.OutputStream.Write($bytes, 0, $bytes.Length)
-  $ctx.Response.OutputStream.Close()
-  $body = $task.Result.Content.ReadAsStringAsync().Result
-  $listener.Stop(); $listener.Close()
-  if ($body -notmatch 'Merkmale') { throw 'Listener lieferte die Seite nicht' }
   $one = ConvertTo-PlainJson @{ characteristics = @(@{ id = 'nur-eins'; measurements = @(@{ value = 1.5 }) }) }
   if ($one -notmatch '"characteristics":\[') { throw 'Einzelnes Merkmal muss ein Array sein' }
   if ($one -notmatch '"measurements":\[') { throw 'Einzelner Messwert muss ein Array sein' }
-  Remove-Item -Recurse -Force $dir
   $filter = Build-PieceFilter 'proj-1' 'tpl-1' '2026-01-01' '2026-01-31'
   if ($filter -notmatch 'inspectorProject/id eq proj-1') { throw 'Projektfilter fehlt' }
   if ($filter -notmatch 'inspectorPieceTemplate/id eq tpl-1') { throw 'Templatefilter fehlt' }
   if ($filter -notmatch 'creationDateUser ge 2026-01-01T00:00:00Z') { throw 'Von-Datum fehlt' }
   if ($filter -notmatch 'creationDateUser le 2026-01-31T23:59:59Z') { throw 'Bis-Datum fehlt' }
-  if ($filter -match 'controlsCount') { throw 'controlsCount darf nicht im Filter stehen' }
   $bare = Build-PieceFilter 'proj-1' '' '' ''
   if ($bare -match 'inspectorPieceTemplate') { throw 'Ohne Vorlage kein Templatefilter' }
   $settingsDir = Join-Path ([IO.Path]::GetTempPath()) ('dl-merkmal-set-' + [guid]::NewGuid().ToString('N'))
   New-Item -ItemType Directory -Path $settingsDir | Out-Null
   $Script:SettingsFile = Join-Path $settingsDir 'settings.json'
   $Script:HostUrl = 'https://example.test'
-  $Script:Token = ''
-  $Script:TemplateId = 'tpl-1'
-  $Script:TemplateName = 'Vorlage Eins'
+  $Script:Token = 'plain-secret-value'
+  $Script:PollSeconds = 45
   Save-Settings
   $saved = Read-Utf8Text $Script:SettingsFile
-  if ($saved -notmatch 'tpl-1') { throw 'templateId nicht gespeichert' }
-  if ($saved -notmatch 'Vorlage Eins') { throw 'templateName nicht gespeichert' }
-  $Script:TemplateId = ''
-  $Script:TemplateName = ''
+  if ($saved -match 'plain-secret-value') { throw 'Token steht im Klartext' }
+  if ($saved -notmatch 'tokenProtected') { throw 'tokenProtected fehlt' }
+  $Script:Token = ''
+  $Script:HostUrl = ''
   Load-Settings | Out-Null
-  if ($Script:TemplateId -ne 'tpl-1') { throw 'templateId nicht geladen' }
-  if ($Script:TemplateName -ne 'Vorlage Eins') { throw 'templateName nicht geladen' }
+  if ($Script:Token -ne 'plain-secret-value') { throw 'Token wurde nicht entschluesselt' }
+  $public = ConvertTo-PlainJson (Get-PublicSettings)
+  if ($public -match 'plain-secret-value' -or $public -match 'tokenProtected') { throw 'Token an den Browser' }
+  if ($public -notmatch '"tokenSet":true') { throw 'tokenSet fehlt' }
   Remove-Item -Recurse -Force $settingsDir
+  $Script:HostUrl = 'https://example.test'
+  $Script:MockJson = { param($Url) return (Get-MockBody $Url) }
+  $Script:MockSizes = @{ 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' = [int64]1200000; 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' = [int64]62914560 }
+  $Script:MockCalls = 0
+  $page = Get-ProjectPage 'alpha' '' 20 0
+  $decoded = [Uri]::UnescapeDataString($Script:LastUrl)
+  if ($decoded -notmatch 'contains\(tolower\(name\)') { throw 'Suche nutzt nicht contains(tolower(name))' }
+  if ($Script:LastUrl -match 'nextLink') { throw 'nextLink darf nicht angefragt werden' }
+  if ($page.items.Count -ne 1 -or $page.items[0].name -ne 'Projekt Alpha') { throw 'Projektsuche leer' }
+  if ($page.items[0].workspaceName -ne 'Arbeitsbereich Eins') { throw 'Workspace fehlt' }
+  $Script:MockJson = { param($Url) if ($Url -match 'InspectorPieceTemplates' -and $Url -notmatch 'Form') { return '{"value":[]}' }; if ($Url -match 'expand=inspectorPieceTemplates') { return '{"id":"proj-beta","inspectorPieceTemplates":[]}' }; return (Get-MockBody $Url) }
+  $none = Get-PieceTemplates 'proj-beta'
+  if ($none.items.Count -ne 0) { throw 'Projekt ohne Vorlage hat Vorlagen' }
+  $pieces = Get-ProjectPieces 'proj-beta' $true '' 20
+  if (([Uri]::UnescapeDataString($Script:LastUrl)) -notmatch 'inspectorPieceTemplate eq null') { throw 'Unlinked-Filter fehlt' }
+  if ($pieces.items.Count -ne 1 -or $pieces.items[0].id -ne 'piece-loose') { throw 'Teil ohne Vorlage fehlt' }
+  $Script:MockJson = { param($Url) return (Get-MockBody $Url) }
+  $tpl = Get-PieceTemplates 'proj-alpha'
+  if ($tpl.items.Count -ne 1 -or $tpl.items[0].pieceCount -ne 4) { throw 'Vorlage oder Teilezahl falsch' }
+  if ($tpl.items[0].samplePieceId -ne 'piece-a') { throw 'Beispielteil fehlt' }
+  $models = Get-PieceModels 'piece-asm'
+  if ($models.items.Count -ne 3) { throw 'Drei Modelle erwartet' }
+  $hashes = @{}
+  foreach ($m in $models.items) { $hashes[$m.hash] = $true }
+  if ($hashes.Count -ne 2) { throw 'Doppelter Hash muss gleich bleiben' }
+  $large = $false
+  foreach ($m in $models.items) { if ([int64]$m.sizeBytes -gt 50MB) { $large = $true } }
+  if (-not $large) { throw 'Grosse Datei ohne Groesse' }
+  $named = Get-NamedControls 'tpl-1' ''
+  if ($named.items.Count -ne 2 -or $named.items[0].objectName -ne 'Objekt 1' -or $named.items[0].id -ne 'ctl-1') { throw 'Vorlagen-Merkmale falsch' }
+  $loose = Get-NamedControls '' 'piece-loose'
+  if ($loose.items.Count -ne 1 -or $loose.items[0].name -ne 'Ebenheit') { throw 'Teil-Merkmale falsch' }
+  $listener = New-Object System.Net.HttpListener
+  $listener.Prefixes.Add('http://127.0.0.1:8778/')
+  $listener.Start()
+  $client = New-Object System.Net.Http.HttpClient
+  $task = $client.GetAsync('http://127.0.0.1:8778/api/version')
+  $ctx = $listener.GetContext()
+  Handle-Request $ctx
+  try { $ctx.Response.OutputStream.Close() } catch {}
+  $body = $task.Result.Content.ReadAsStringAsync().Result
+  $listener.Stop(); $listener.Close()
+  if ($body -notmatch '"version":"0.6.0"') { throw "Version falsch: $body" }
   Write-Host 'SelfTest OK'
 }
 if ($env:DL_MERKMAL_SELFTEST -eq '1') { Invoke-SelfTest; exit 0 }
-New-Item -ItemType Directory -Path $Script:AppDir -Force | Out-Null
-$ready = $false
-try { $ready = Load-Settings } catch { $ready = $false }
-if (-not $ready) {
-  if (-not (Show-FirstRun)) { exit 1 }
-  Save-Settings
+Install-Self
+Ensure-Dirs
+try { Load-Settings | Out-Null } catch { Write-Log $_.Exception.Message }
+try { Ensure-Cache } catch {
+  Add-Type -AssemblyName System.Windows.Forms
+  [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, 'DL-Merkmal-Viewer')
+  exit 1
 }
-try { Ensure-Cache } catch { [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, 'DL-Merkmal-Viewer') ; exit 1 }
-Start-HttpServer
-Show-Main
+Start-ServerLoop
 exit 0
