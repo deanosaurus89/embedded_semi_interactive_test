@@ -24,7 +24,7 @@
           <span class="badge" id="template-badge" hidden></span>
           <span class="badge" id="data-badge">Beispieldaten</span>
           <span class="badge is-published" id="setup-badge">Veröffentlichte Ansicht</span>
-          <span class="badge" id="app-version">0.6.0</span>
+          <span class="badge" id="app-version">0.7.0</span>
         </h1>
         <div class="tools">
           <label class="filter">
@@ -40,6 +40,8 @@
           <label class="filter">Von <input id="filter-from" type="date" aria-label="Von Datum" /></label>
           <label class="filter">Bis <input id="filter-to" type="date" aria-label="Bis Datum" /></label>
           <button type="button" id="view-lock" class="is-locked" aria-pressed="true">Ansicht entsperren</button>
+          <button type="button" id="view-save" hidden>Ansicht speichern</button>
+          <button type="button" id="view-open" hidden>Ansicht öffnen</button>
           <button type="button" id="change-selection" hidden>Auswahl ändern</button>
           <button type="button" id="prepare">Vorbereiten</button>
           <button type="button" id="finish" hidden>Abschließen</button>
@@ -142,7 +144,22 @@
               <button type="button" id="fit-cancel">Abbrechen</button>
             </div>
           </div>
+          <div id="view-dialog" class="view-dialog" hidden>
+            <label>Name <input id="view-name" type="text" maxlength="64" placeholder="rev-b" /></label>
+            <button type="button" id="view-save-ok">Speichern</button>
+            <ul id="view-list" class="pick-list"></ul>
+          </div>
           <h2>Fähnchen</h2>
+          <label>
+            Fußpunkt
+            <select id="foot-mode" title="Nächster Punkt: der Punkt der Geometrie, der auf dem Bildschirm am nächsten am Fähnchen liegt. Er wird bei jeder Kamerabewegung neu berechnet, damit die Linie in der gedrehten Ansicht sinnvoll bleibt.">
+              <option value="center">Mitte</option>
+              <option value="contour">Außenkontur</option>
+              <option value="nearest">Nächster Punkt</option>
+              <option value="mesh">Punkt auf Modell</option>
+            </select>
+          </label>
+          <div id="color-palette" class="swatches" role="listbox" aria-label="Farbe des Merkmals"></div>
           <label>
             Ausgewählt
             <select id="char-select"></select>
@@ -159,7 +176,9 @@
                 Anbindung
                 <select id="geo-attach">
                   <option value="center">Mitte</option>
-                  <option value="nearest">Rand, nächster Punkt</option>
+                  <option value="contour">Außenkontur</option>
+                  <option value="nearest">Nächster Punkt</option>
+                  <option value="mesh">Punkt auf Modell</option>
                 </select>
               </label>
             </div>

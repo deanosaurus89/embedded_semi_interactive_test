@@ -111,4 +111,6 @@ export const GEOMETRY_PALETTE = [
   "#0e7490",
   "#b4539a",
   "#3f6212",
+  "#7c3aed",
+  "#a16207",
 ];

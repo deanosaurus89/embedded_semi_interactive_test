@@ -20,7 +20,8 @@ Der kleine Statusdialog zeigt die Version und oeffnet den Browser auf `http://lo
 4. Teilevorlage waehlen. Hat das Projekt keine, ein Teil ohne Vorlage waehlen.
 5. Referenzobjekte anhaken (Name und Groesse, Warnung ueber 50 MB). Gleiche Datei nur einmal laden.
 6. Merkmale anhaken, hoechstens 10, mit **Kleine Beschriftungen** hoechstens 20.
-7. **Uebernehmen**, dann **Vorbereiten** wie bisher.
+7. **Uebernehmen**, dann **Vorbereiten**. Fuss punkt: Mitte, Aussenkontur, Naechster Punkt oder Punkt auf Modell. Die Farbe des Merkmals steht im Faehnchen und in der Linie.
+8. **Ansicht speichern**. Der iframe ist dann `http://localhost:8765/?view=NAME` und startet gesperrt. Die Datei liegt unter `views\<name>.json`.
 
 ```html
 <iframe src="http://localhost:8765/" title="Merkmale"></iframe>
