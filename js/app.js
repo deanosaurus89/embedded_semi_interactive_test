@@ -62,6 +62,8 @@ const els = {
   wizard: document.getElementById("wizard"),
   changeSelection: document.getElementById("change-selection"),
   templateBadge: document.getElementById("template-badge"),
+  viewBadge: document.getElementById("view-badge"),
+  standBadge: document.getElementById("stand-badge"),
   dataBadge: document.getElementById("data-badge"),
   setupBadge: document.getElementById("setup-badge"),
   filterCount: document.getElementById("filter-count"),
@@ -148,6 +150,9 @@ const state = {
   warnedLive: false,
   session: null,
   loadedModels: [],
+  holdLayout: false,
+  liveTimer: 0,
+  liveInterval: 60,
 };
 
 const PICK_MIN = { Linie: 2, Kreis: 3, Ebene: 4, Kugel: 4, Zylinder: 4, Kegel: 4, Langloch: 4 };
@@ -309,6 +314,15 @@ async function startAuthor(params) {
     });
   }
   for (const button of [els.viewSave, els.viewOpen]) if (button) button.hidden = false;
+  try {
+    const settings = await fetch("/api/settings", { cache: "no-store" });
+    if (settings.ok) {
+      const body = await settings.json();
+      if (Number(body.pollSeconds) >= 5) state.liveInterval = Number(body.pollSeconds);
+    }
+  } catch {
+    /* interval stays at the default */
+  }
   const viewName = params.get("view");
   if (viewName) {
     try {
@@ -363,6 +377,7 @@ async function applyAuthorSelection(selection) {
     templateId: selection.template?.id || null,
     templateName: selection.template?.name || "",
     pieceId: selection.template ? null : selection.piece?.id || null,
+    pieceName: selection.template ? "" : selection.piece?.name || "",
   };
   state.loadedModels = selection.models.map((model) => ({ name: model.name, hash: model.hash, enabled: true }));
   acceptData(data, { mode: "live", initial: true, switched: true });
@@ -378,6 +393,7 @@ async function applyAuthorSelection(selection) {
   cameraIsSaved = false;
   state.userMovedCamera = false;
   reveal();
+  startLivePoll();
 }
 
 function characteristicFromControl(control) {
@@ -2681,6 +2697,62 @@ function setFootMode(mode) {
   updateLeaders();
 }
 
+function liveSelectionUrl() {
+  const url = new URL("/api/live", location.origin);
+  if (state.session?.name) url.searchParams.set("view", state.session.name);
+  else {
+    if (state.session?.projectId) url.searchParams.set("project", state.session.projectId);
+    if (state.session?.templateId) url.searchParams.set("template", state.session.templateId);
+    if (state.session?.pieceId) url.searchParams.set("piece", state.session.pieceId);
+    const ids = (state.data?.characteristics || []).map((item) => item.id).filter(Boolean);
+    if (ids.length) url.searchParams.set("controls", ids.join(","));
+  }
+  url.searchParams.set("top", state.filterCount === "all" ? "5000" : String(state.filterCount || 25));
+  if (state.filterFrom) url.searchParams.set("from", state.filterFrom);
+  if (state.filterTo) url.searchParams.set("to", state.filterTo);
+  return url.href;
+}
+
+function updateStand(data, stale) {
+  if (!els.standBadge) return;
+  els.standBadge.hidden = false;
+  const when = data?.fetchedAt ? new Date(data.fetchedAt) : null;
+  const label = when && !Number.isNaN(when.getTime())
+    ? when.toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" })
+    : "--:--";
+  els.standBadge.textContent = stale ? `Stand: ${label} (veraltet)` : `Stand: ${label}`;
+  els.standBadge.classList.toggle("is-stale", Boolean(stale));
+}
+
+function acceptLive(data) {
+  state.data = data;
+  state.dataMode = "live";
+  refreshFlagContents();
+  updateStand(data, Boolean(data.stale));
+  syncChrome();
+  updateLeaders();
+}
+
+function startLivePoll() {
+  state.holdLayout = true;
+  window.clearInterval(state.liveTimer);
+  const tick = async () => {
+    try {
+      const response = await fetch(liveSelectionUrl(), { cache: "no-store" });
+      if (!response.ok) throw new Error(String(response.status));
+      const raw = await response.json();
+      const data = normalizeMeasurements(raw);
+      data.stale = Boolean(raw.stale);
+      acceptLive(data);
+    } catch {
+      updateStand(state.data, true);
+    }
+  };
+  tick();
+  const seconds = Math.max(5, Number(state.liveInterval) || Number(state.setup?.refreshSeconds) || 60);
+  state.liveTimer = window.setInterval(() => { tick(); }, seconds * 1000);
+}
+
 function saveNamedView() {
   const name = els.viewName?.value?.trim();
   const doc = viewDocument({
@@ -2748,9 +2820,11 @@ async function loadNamedView(name) {
     templateId: view.templateId || null,
     templateName: view.templateName || "",
     pieceId: view.pieceId || null,
+    pieceName: view.pieceId ? (view.templateName || view.pieceId) : "",
   };
   state.loadedModels = view.models || [];
-  await loadHashedModels(state.loadedModels);
+  await loadHashedModels(state.loadedModels, true);
+  if (Number(view.pollSeconds) >= 5) state.liveInterval = Number(view.pollSeconds);
   const template = view.templateId ? { id: view.templateId, name: view.templateName || "" } : { id: `piece:${view.pieceId || "teil"}`, name: view.pieceId || "" };
   const data = normalizeMeasurements({
     schemaVersion: 1,
@@ -2799,9 +2873,10 @@ async function loadNamedView(name) {
   updateLeaders();
   syncChrome();
   reveal();
+  startLivePoll();
 }
 
-async function loadHashedModels(models) {
+async function loadHashedModels(models, cachedOnly = false) {
   if (!state.model) {
     state.model = new THREE.Group();
     scene.add(state.model);
@@ -2811,8 +2886,15 @@ async function loadHashedModels(models) {
   for (const model of models || []) {
     if (!model.hash || model.enabled === false || seen.has(model.hash)) continue;
     seen.add(model.hash);
-    const response = await fetch(`/api/models/${encodeURIComponent(model.hash)}`, { cache: "force-cache" });
-    if (!response.ok) throw new Error(`${model.name || model.hash} fehlt`);
+    const suffix = cachedOnly ? "?cached=1" : "";
+    const response = await fetch(`/api/models/${encodeURIComponent(model.hash)}${suffix}`, { cache: "force-cache" });
+    if (!response.ok) {
+      if (cachedOnly) {
+        toast(`${model.name || model.hash} ist nicht im Cache.`);
+        continue;
+      }
+      throw new Error(`${model.name || model.hash} fehlt`);
+    }
     const parsed = new OBJLoader().parse(await response.text());
     parsed.traverse((obj) => {
       if (!obj.isMesh) return;
@@ -2884,8 +2966,16 @@ function syncChrome() {
   if (state.data?.part?.name) els.partName.textContent = state.data.part.name;
   const template = state.dataMode === "live" ? state.data?.part?.template : null;
   if (els.templateBadge) {
-    els.templateBadge.hidden = !template?.name;
-    els.templateBadge.textContent = template?.name ? `Vorlage: ${template.name}` : "";
+    const pieceOnly = state.session?.pieceId && !state.session?.templateId;
+    const label = pieceOnly
+      ? `Teil: ${state.session.pieceName || template?.name || state.session.pieceId}`
+      : template?.name ? `Vorlage: ${template.name}` : "";
+    els.templateBadge.hidden = !label;
+    els.templateBadge.textContent = label;
+  }
+  if (els.viewBadge) {
+    els.viewBadge.hidden = !state.session?.name;
+    els.viewBadge.textContent = state.session?.name ? `Ansicht: ${state.session.name}` : "";
   }
   els.prepare.hidden = state.edit;
   els.finish.hidden = !state.edit;

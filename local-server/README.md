@@ -22,6 +22,7 @@ Der kleine Statusdialog zeigt die Version und oeffnet den Browser auf `http://lo
 6. Merkmale anhaken, hoechstens 10, mit **Kleine Beschriftungen** hoechstens 20.
 7. **Uebernehmen**, dann **Vorbereiten**. Fuss punkt: Mitte, Aussenkontur, Naechster Punkt oder Punkt auf Modell. Die Farbe des Merkmals steht im Faehnchen und in der Linie.
 8. **Ansicht speichern**. Der iframe ist dann `http://localhost:8765/?view=NAME` und startet gesperrt. Die Datei liegt unter `views\<name>.json`.
+9. Live-Werte kommen nur fuer diese Auswahl: Projekt plus Teilevorlage, oder ohne Vorlage nur Teile mit denselben Kontroll-UUIDs (und demselben snapshotHash, falls vorhanden). Ein kurzer Ausfall zeigt den letzten Stand als veraltet. Modelle ueber 300 MB brauchen eine Bestaetigung; die gespeicherte Ansicht laedt Modelle nur aus dem Cache.
 
 ```html
 <iframe src="http://localhost:8765/" title="Merkmale"></iframe>

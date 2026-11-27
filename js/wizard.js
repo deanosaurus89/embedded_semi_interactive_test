@@ -1,4 +1,5 @@
 const LARGE_BYTES = 50 * 1024 * 1024;
+const HUGE_BYTES = 300 * 1024 * 1024;
 
 const els = {
   root: document.getElementById("wizard"),
@@ -196,7 +197,7 @@ async function chooseProject(project) {
   els.pieceSearch.hidden = list.length > 0;
   els.showPieces.hidden = list.length === 0;
   if (!list.length) {
-    els.choiceTitle.textContent = `${project.name}: keine Teilevorlage, bitte ein Teil wählen.`;
+    els.choiceTitle.textContent = `${project.name}: keine Teilevorlage. Es gelten später nur Teile dieses Projekts ohne Vorlage, deren Kontroll-UUIDs genau dem gewählten Teil entsprechen.`;
     showPanel("choice");
     await loadPieces();
     return;
@@ -215,6 +216,7 @@ async function chooseProject(project) {
 
 async function loadPieces() {
   clearError();
+  if (picked.project) els.choiceTitle.textContent = `${picked.project.name}: Teile ohne Vorlage. Live-Daten nutzen nur Teile mit genau denselben Kontroll-UUIDs.`;
   els.pieceSearch.hidden = false;
   const params = new URLSearchParams();
   params.set("unlinked", "1");
@@ -263,17 +265,19 @@ async function showModels(pieceId) {
     const duplicate = seen.has(model.hash);
     seen.set(model.hash, true);
     const large = Number(model.sizeBytes) > LARGE_BYTES;
+    const huge = Number(model.sizeBytes) > HUGE_BYTES;
     const label = document.createElement("label");
     label.className = "pick";
     const box = document.createElement("input");
     box.type = "checkbox";
-    box.checked = !duplicate && !large;
+    box.checked = !duplicate && !large && !huge;
     box.dataset.hash = model.hash;
     box.dataset.name = model.name;
     const text = document.createElement("span");
     const notes = [formatBytes(model.sizeBytes)];
     if (duplicate) notes.push("gleiche Datei");
-    if (large) notes.push("über 50 MB");
+    if (huge) notes.push("über 300 MB, Bestätigung nötig");
+    else if (large) notes.push("über 50 MB");
     text.innerHTML = `${escapeHtml(model.name)} <span class="${large ? "meta warn" : "meta"}">${escapeHtml(notes.filter(Boolean).join(" · "))}</span>`;
     label.append(box, text);
     const item = document.createElement("li");
@@ -288,10 +292,22 @@ async function showModels(pieceId) {
   showPanel("models");
 }
 
+function confirmHuge(models) {
+  const huge = models.filter((model) => Number(model.sizeBytes) > HUGE_BYTES);
+  if (!huge.length) return true;
+  return window.confirm(`${huge.map((model) => model.name).join(", ")} ist größer als 300 MB. In dieser Vorbereitung trotzdem laden?`);
+}
+
+function selectedRecords() {
+  const byHash = new Map(picked.models.map((model) => [model.hash, model]));
+  return selectedModels().map((model) => ({ ...model, sizeBytes: Number(byHash.get(model.hash)?.sizeBytes) || 0 }));
+}
+
 async function openControls() {
   clearError();
-  const selected = selectedModels();
+  const selected = selectedRecords();
   if (!selected.length) throw new Error("Mindestens ein Referenzobjekt auswählen.");
+  if (!confirmHuge(selected)) throw new Error("Großes Modell nicht bestätigt.");
   const params = new URLSearchParams();
   if (picked.template?.id) params.set("templateId", picked.template.id);
   else params.set("pieceId", picked.piece.id);
@@ -365,8 +381,9 @@ function selectedControls() {
 
 async function finish() {
   clearError();
-  const models = selectedModels();
+  const models = selectedRecords();
   const controls = selectedControls();
+  if (!confirmHuge(models)) throw new Error("Großes Modell nicht bestätigt.");
   const cap = labelCap(els.small.checked);
   if (!models.length) throw new Error("Mindestens ein Referenzobjekt auswählen.");
   if (!controls.length) throw new Error("Mindestens ein Merkmal auswählen.");
