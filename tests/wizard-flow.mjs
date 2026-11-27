@@ -41,7 +41,7 @@ function json(res, obj) {
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, "http://127.0.0.1");
   const route = url.pathname;
-  if (route === "/api/version") return json(res, { name: "DL-Merkmal-Viewer", version: "0.7.0" });
+  if (route === "/api/version") return json(res, { name: "DL-Merkmal-Viewer", version: "0.8.0" });
   if (route === "/api/settings" && req.method === "GET") return json(res, { server: "", tokenSet: false, pollSeconds: 60 });
   if (route === "/api/settings" && req.method === "POST") {
     let raw = "";
@@ -100,7 +100,7 @@ await page.goto(`http://127.0.0.1:${port}/index.html?probe=1`, { waitUntil: "dom
 await page.waitForSelector("#wizard:not([hidden])");
 const version = await page.$eval("#app-version", (el) => el.textContent.trim());
 const noteHidden = await page.$eval("#demo-note", (el) => el.hidden);
-if (version !== "0.7.0" || !noteHidden) throw new Error(`Start falsch version=${version} note=${noteHidden}`);
+if (version !== "0.8.0" || !noteHidden) throw new Error(`Start falsch version=${version} note=${noteHidden}`);
 await page.type("#project-q", "Projekt");
 await page.click("#project-search");
 await page.waitForSelector("#project-results button");

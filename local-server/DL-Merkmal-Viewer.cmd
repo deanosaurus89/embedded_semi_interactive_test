@@ -6,7 +6,7 @@ exit /b
 $ErrorActionPreference = 'Stop'
 if (-not $env:LOCALAPPDATA) { $env:LOCALAPPDATA = [IO.Path]::GetTempPath() }
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
-$Script:Version = '0.7.0'
+$Script:Version = '0.8.0'
 $Script:AppDir = Join-Path $env:LOCALAPPDATA 'DL-Merkmal-Viewer'
 $Script:SettingsFile = Join-Path $Script:AppDir 'settings.json'
 $Script:CacheDir = Join-Path $Script:AppDir 'cache'
@@ -154,15 +154,20 @@ function Get-ModelSize([string]$Hash) {
   $Script:SizeCache[$Hash] = $size
   return $size
 }
+function Has-Prop($obj, [string]$name) {
+  if ($null -eq $obj -or $obj -is [System.Array] -or $obj -is [ValueType] -or $obj -is [string]) { return $false }
+  foreach ($p in @($obj.PSObject.Properties)) { if ($p.Name -eq $name) { return $true } }
+  return $false
+}
 function Get-Rows($json) {
   $list = New-List
-  if ($null -eq $json) { return $list }
+  if ($null -eq $json) { return ,$list }
   $value = $null
   if ($json -is [System.Array]) { $value = $json }
-  elseif ($json.PSObject.Properties.Name -contains 'value') { $value = $json.value }
-  if ($null -eq $value) { return $list }
+  elseif (Has-Prop $json 'value') { $value = $json.value }
+  if ($null -eq $value) { return ,$list }
   foreach ($row in @($value)) { if ($null -ne $row) { [void]$list.Add($row) } }
-  return $list
+  return ,$list
 }
 function Get-ProjectPage([string]$Q, [string]$Workspace, [int]$Top, [int]$Skip) {
   if ($Top -lt 1) { $Top = 20 }
@@ -421,6 +426,229 @@ function Save-View([string]$Raw) {
   if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null }
   Write-Utf8Text (Join-Path $dir ($safe + '.json')) $Raw
 }
+function Join-IdSet($controls) {
+  $ids = @()
+  foreach ($c in @($controls)) {
+    if ($null -eq $c) { continue }
+    $id = As-Str $c.id
+    if ($id) { $ids += [string]$id }
+  }
+  if ($ids.Count -lt 1) { return '' }
+  for ($i = 0; $i -lt $ids.Count; $i++) {
+    for ($j = $i + 1; $j -lt $ids.Count; $j++) {
+      if ([string]$ids[$j] -lt [string]$ids[$i]) { $tmp = $ids[$i]; $ids[$i] = $ids[$j]; $ids[$j] = $tmp }
+    }
+  }
+  return ($ids -join '|')
+}
+function Get-PieceControls([string]$PieceId) {
+  $json = Invoke-DlGet (Build-Url '/Controls' @{ '$filter' = "inspectorPiece/id eq $PieceId" })
+  $rows = @()
+  foreach ($row in @(Get-Rows $json)) { $rows += $row }
+  return ,$rows
+}
+function Limit-Of($c) {
+  $low = 0.0; $up = 0.0
+  if ($c.tolerance) {
+    if ($null -ne $c.tolerance.low) { $low = [double]$c.tolerance.low }
+    if ($null -ne $c.tolerance.up) { $up = [double]$c.tolerance.up }
+  }
+  if ($null -eq $c.nominal) { return @{ nominal = 0.0; usl = $up; lsl = $low } }
+  $n = [double]$c.nominal
+  return @{ nominal = $n; usl = ($n + $up); lsl = ($n + $low) }
+}
+function Unit-Of($c) {
+  $u = ''
+  if ($c.units) { $u = As-Str $c.units.length }
+  if ($u -eq 'Millimeters') { return 'mm' }
+  if ($u -eq 'Inches') { return 'in' }
+  return 'mm'
+}
+function Live-CacheKey($q) {
+  $viewName = ''
+  if ($q.Contains('view') -and [string]$q['view']) { return 'view-' + (Safe-ViewName ([string]$q['view'])) }
+  $project = ''
+  if ($q.Contains('project')) { $project = [string]$q['project'] }
+  $tail = ''
+  if ($q.Contains('template') -and [string]$q['template']) { $tail = [string]$q['template'] }
+  elseif ($q.Contains('piece')) { $tail = 'piece-' + [string]$q['piece'] }
+  $raw = "session-$project-$tail"
+  return ($raw -replace '[^A-Za-z0-9_-]', '-')
+}
+function Live-CachePath([string]$Key) {
+  $dir = Join-Path $Script:AppDir 'cache\live'
+  if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null }
+  return (Join-Path $dir ($Key + '.json'))
+}
+function Convert-ToMap($v) {
+  if ($null -eq $v) { return $null }
+  if ($v -is [string] -or $v -is [bool] -or $v -is [ValueType]) { return $v }
+  if ($v -is [System.Collections.IDictionary]) {
+    $map = @{}
+    foreach ($k in @($v.Keys)) { $map[[string]$k] = Convert-ToMap $v[$k] }
+    return $map
+  }
+  if ($v -is [System.Collections.IEnumerable]) {
+    $list = New-List
+    foreach ($item in $v) { [void]$list.Add((Convert-ToMap $item)) }
+    return ,$list
+  }
+  $map = @{}
+  foreach ($p in @($v.PSObject.Properties)) { $map[$p.Name] = Convert-ToMap $p.Value }
+  return $map
+}
+function Write-LiveCache([string]$Key, $Doc) { Write-Utf8Text (Live-CachePath $Key) (ConvertTo-PlainJson $Doc) }
+function Read-LiveCache([string]$Key) {
+  $path = Live-CachePath $Key
+  if (-not (Test-Path -LiteralPath $path)) { return $null }
+  $obj = (Read-Utf8Text $path) | ConvertFrom-Json
+  return (Convert-ToMap $obj)
+}
+function Get-LivePieceRows([string]$projectId, [string]$templateId, [string]$basisId, [int]$top, [string]$from, [string]$to) {
+  if (-not [string]::IsNullOrEmpty($templateId)) {
+    $filter = Build-PieceFilter $projectId $templateId $from $to
+    $json = Invoke-DlGet (Build-Url '/InspectorPieces' @{ '$filter' = $filter; '$orderby' = 'creationDateUser desc'; '$top' = [string]$top; '$select' = 'id,name,creationDateUser,userProperties' })
+    return (Get-Rows $json)
+  }
+  # No template: same project, unlinked, same control UUID set.
+  # If the chosen piece has snapshotHash, the piece must share that form snapshot too.
+  $basis = Invoke-DlGet ((Get-ApiBase) + "/InspectorPieces/$basisId" + '?$select=id,name,snapshotHash')
+  $snap = As-Str $basis.snapshotHash
+  $basisSet = Join-IdSet (Get-PieceControls $basisId)
+  $filter = (Build-PieceFilter $projectId '' $from $to) + ' and inspectorPieceTemplate eq null'
+  $json = Invoke-DlGet (Build-Url '/InspectorPieces' @{ '$filter' = $filter; '$orderby' = 'creationDateUser desc'; '$top' = [string]$top; '$select' = 'id,name,creationDateUser,snapshotHash,userProperties' })
+  $kept = New-List
+  $listed = Get-Rows $json
+  foreach ($row in $listed) {
+    $rowSnap = As-Str $row.snapshotHash
+    if ($snap.Length -gt 0 -and $rowSnap -cne $snap) { continue }
+    $set = Join-IdSet (Get-PieceControls (As-Str $row.id))
+    if ($set -ceq $basisSet) { [void]$kept.Add($row) }
+  }
+  return @($kept.ToArray())
+}
+function Build-LiveDocument($q) {
+  $view = $null
+  $viewName = ''
+  if ($q.Contains('view') -and [string]$q['view']) { $viewName = [string]$q['view'] }
+  $project = ''; $template = ''; $piece = ''; $partName = ''; $templateName = ''
+  $ids = New-Object System.Collections.Generic.List[string]
+  $poll = [int]$Script:PollSeconds
+  if ($viewName) {
+    $raw = Read-View $viewName
+    if (-not $raw) { throw 'Ansicht fehlt' }
+    $view = $raw | ConvertFrom-Json
+    $project = As-Str $view.projectId
+    $template = As-Str $view.templateId
+    $piece = As-Str $view.pieceId
+    $partName = As-Str $view.projectName
+    $templateName = As-Str $view.templateName
+    if ($view.pollSeconds) { $poll = [int]$view.pollSeconds }
+    foreach ($c in @($view.controls)) {
+      if ($null -eq $c) { continue }
+      $take = $true
+      if (($c.PSObject.Properties.Name -contains 'selected') -and ($c.selected -eq $false)) { $take = $false }
+      if ($take -and (As-Str $c.id)) { [void]$ids.Add((As-Str $c.id)) }
+    }
+  } else {
+    if ($q.Contains('project')) { $project = [string]$q['project'] }
+    if ($q.Contains('template')) { $template = [string]$q['template'] }
+    if ($q.Contains('piece')) { $piece = [string]$q['piece'] }
+    $partName = $project
+    $templateName = $template
+    if ($q.Contains('controls') -and [string]$q['controls']) {
+      foreach ($bit in ([string]$q['controls']).Split(',')) {
+        $bit = $bit.Trim()
+        if ($bit) { [void]$ids.Add($bit) }
+      }
+    }
+  }
+  if (-not $project) { throw 'Projekt fehlt' }
+  $top = 25
+  if ($q.Contains('top')) { [void][int]::TryParse([string]$q['top'], [ref]$top) }
+  if ($top -lt 1) { $top = 1 }
+  if ($top -gt 5000) { $top = 5000 }
+  $from = ''; $to = ''
+  if ($q.Contains('from')) { $from = [string]$q['from'] }
+  if ($q.Contains('to')) { $to = [string]$q['to'] }
+  $allow = @{}
+  foreach ($id in $ids) { $allow[$id] = $true }
+  $desc = @(Get-LivePieceRows $project $template $piece $top $from $to)
+  $ordered = New-List
+  for ($i = $desc.Count - 1; $i -ge 0; $i--) { if ($null -ne $desc[$i]) { [void]$ordered.Add($desc[$i]) } }
+  $chars = @{}
+  $charOrder = New-List
+  foreach ($id in $ids) {
+    if ($chars.ContainsKey($id)) { continue }
+    $entry = @{ id = $id; name = $id; objectName = ''; controlName = ''; displayName = ''; unit = 'mm'; nominal = 0.0; usl = 0.0; lsl = 0.0; measurements = (New-List) }
+    if ($view) {
+      foreach ($c in @($view.controls)) {
+        if ($null -ne $c -and (As-Str $c.id) -eq $id) {
+          $entry.objectName = As-Str $c.objectName
+          $entry.controlName = As-Str $c.name
+          if ($entry.objectName) { $entry.name = ($entry.objectName + ' / ' + $entry.controlName) } else { $entry.name = $entry.controlName }
+          if ($null -ne $c.nominal) { $entry.nominal = [double]$c.nominal }
+          if ($null -ne $c.usl) { $entry.usl = [double]$c.usl }
+          if ($null -ne $c.lsl) { $entry.lsl = [double]$c.lsl }
+        }
+      }
+    }
+    $chars[$id] = $entry
+    [void]$charOrder.Add($id)
+  }
+  $pieceOut = New-List
+  foreach ($p in $ordered) {
+    $pieceId = As-Str $p.id
+    [void]$pieceOut.Add(@{ id = $pieceId; name = (As-Str $p.name); timestamp = (As-Str $p.creationDateUser) })
+    $controls = Get-PieceControls $pieceId
+    foreach ($c in $controls) {
+      $id = As-Str $c.id
+      if (-not $allow.ContainsKey($id)) { continue }
+      if (-not $chars.ContainsKey($id)) { continue }
+      $lim = Limit-Of $c
+      $chars[$id].nominal = $lim.nominal
+      $chars[$id].usl = $lim.usl
+      $chars[$id].lsl = $lim.lsl
+      $chars[$id].unit = Unit-Of $c
+      $chars[$id].objectName = As-Str $c.objectName
+      $chars[$id].controlName = As-Str $c.name
+      if ($chars[$id].objectName) { $chars[$id].name = ($chars[$id].objectName + ' / ' + $chars[$id].controlName) }
+      if ($null -eq $c.measured) { continue }
+      $stamp = As-Str $c.measurementDateTime
+      if (-not $stamp) { $stamp = As-Str $p.creationDateUser }
+      [void]$chars[$id].measurements.Add(@{ pieceId = $pieceId; pieceName = (As-Str $p.name); value = [double]$c.measured; timestamp = $stamp; creationDateUser = (As-Str $p.creationDateUser); userProperties = @{} })
+    }
+  }
+  $charOut = New-List
+  foreach ($id in $charOrder) { [void]$charOut.Add($chars[$id]) }
+  $tplId = $template
+  $tplLabel = $templateName
+  if (-not $tplId -and $piece) { $tplId = 'piece:' + $piece; if (-not $tplLabel) { $tplLabel = $piece } }
+  return @{
+    schemaVersion = 1
+    source = 'live'
+    stale = $false
+    refreshSeconds = $poll
+    fetchedAt = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
+    part = @{ id = $project; name = $(if ($partName) { $partName } else { $project }); template = @{ id = $tplId; name = $tplLabel } }
+    pieces = $pieceOut
+    features = (New-List)
+    characteristics = $charOut
+  }
+}
+function Get-LiveResponse($q) {
+  $key = Live-CacheKey $q
+  try {
+    $doc = Build-LiveDocument $q
+    Write-LiveCache $key $doc
+    return $doc
+  } catch {
+    $cached = Read-LiveCache $key
+    if ($null -eq $cached) { throw }
+    $cached.stale = $true
+    return $cached
+  }
+}
 function Handle-Api($ctx, [string]$Method, [string]$Path) {
   if ($Path -eq '/api/version' -and $Method -eq 'GET') { Send-Json $ctx 200 @{ name = 'DL-Merkmal-Viewer'; version = $Script:Version }; return }
   if ($Path -eq '/api/settings') {
@@ -436,6 +664,7 @@ function Handle-Api($ctx, [string]$Method, [string]$Path) {
     }
   }
   $q = Read-Query $ctx
+  if ($Path -eq '/api/live' -and $Method -eq 'GET') { Send-Json $ctx 200 (Get-LiveResponse $q); return }
   if ($Path -eq '/api/projects' -and $Method -eq 'GET') {
     $top = 20; $skip = 0
     if ($q.Contains('top')) { [void][int]::TryParse([string]$q['top'], [ref]$top) }
@@ -466,7 +695,11 @@ function Handle-Api($ctx, [string]$Method, [string]$Path) {
   }
   if ($Path -match '^/api/models/([0-9a-fA-F]+)$' -and $Method -eq 'GET') {
     $hash = $Matches[1].ToLower()
-    $file = Ensure-ModelFile $hash
+    $cachedOnly = $q.Contains('cached') -and [string]$q['cached'] -eq '1'
+    if ($cachedOnly) {
+      $file = Model-Path $hash
+      if (-not (Test-Path -LiteralPath $file)) { Send-Json $ctx 404 @{ error = 'nicht im Cache' }; return }
+    } else { $file = Ensure-ModelFile $hash }
     $ctx.Response.StatusCode = 200
     $ctx.Response.ContentType = 'model/obj'
     $ctx.Response.Headers['Cache-Control'] = 'public, max-age=86400'
@@ -637,6 +870,18 @@ function Get-MockBody([string]$Url) {
   if ($Url -match 'InspectorPieces') { return '{"value":[]}' }
   return '{"value":[]}'
 }
+function Get-LiveMock([string]$Url) {
+  $Url = [Uri]::UnescapeDataString($Url)
+  if ($Url -match 'inspectorPieceTemplate/id eq tpl-b') { return '{"value":[{"id":"piece-b","name":"Teil B","creationDateUser":"2026-11-01T00:00:00Z"}]}' }
+  if ($Url -match 'inspectorPieceTemplate/id eq tpl-a') { return '{"value":[{"id":"piece-a","name":"Teil A","creationDateUser":"2026-11-02T00:00:00Z"}]}' }
+  if ($Url -match '/InspectorPieces/piece-loose') { return '{"id":"piece-loose","name":"Teil Lose","snapshotHash":"snap-1"}' }
+  if ($Url -match 'inspectorPieceTemplate eq null') { return '{"value":[{"id":"piece-loose","name":"Teil Lose","creationDateUser":"2026-11-03T00:00:00Z","snapshotHash":"snap-1"},{"id":"piece-other","name":"Teil Anders","creationDateUser":"2026-11-04T00:00:00Z","snapshotHash":"snap-1"},{"id":"piece-same","name":"Teil Gleich","creationDateUser":"2026-11-05T00:00:00Z","snapshotHash":"snap-1"},{"id":"piece-oldsnap","name":"Teil Alt","creationDateUser":"2026-11-06T00:00:00Z","snapshotHash":"snap-9"}]}' }
+  if ($Url -match 'inspectorPiece/id eq piece-b') { return '{"value":[{"id":"ctl-b1","objectName":"Objekt B","name":"Merkmal B","nominal":1,"tolerance":{"low":-0.1,"up":0.1},"measured":1.01},{"id":"ctl-b2","objectName":"Objekt B","name":"Nicht Gewaehlt","nominal":2,"tolerance":{"low":0,"up":0.2},"measured":2}]}' }
+  if ($Url -match 'inspectorPiece/id eq piece-a') { return '{"value":[{"id":"ctl-a1","objectName":"Objekt A","name":"Merkmal A","nominal":3,"tolerance":{"low":0,"up":0.1},"measured":3}]}' }
+  if ($Url -match 'inspectorPiece/id eq piece-loose' -or $Url -match 'inspectorPiece/id eq piece-same' -or $Url -match 'inspectorPiece/id eq piece-oldsnap') { return '{"value":[{"id":"ctl-u1","objectName":"Flaeche","name":"Ebenheit","nominal":0,"tolerance":{"low":0,"up":0.05},"measured":0.01},{"id":"ctl-u2","objectName":"Kante","name":"Laenge","nominal":5,"tolerance":{"low":-0.1,"up":0.1},"measured":5.02}]}' }
+  if ($Url -match 'inspectorPiece/id eq piece-other') { return '{"value":[{"id":"ctl-x","objectName":"Fremd","name":"Fremd","nominal":9,"tolerance":{"low":0,"up":1},"measured":9}]}' }
+  return '{"value":[]}'
+}
 function Invoke-SelfTest {
   $launch = $env:DL_LAUNCH
   if ($launch -and (Test-Path -LiteralPath $launch)) {
@@ -719,7 +964,7 @@ function Invoke-SelfTest {
   try { $ctx.Response.OutputStream.Close() } catch {}
   $body = $task.Result.Content.ReadAsStringAsync().Result
   $listener.Stop(); $listener.Close()
-  if ($body -notmatch '"version":"0.7.0"') { throw "Version falsch: $body" }
+  if ($body -notmatch '"version":"0.8.0"') { throw "Version falsch: $body" }
   $viewRoot = Join-Path ([IO.Path]::GetTempPath()) ('dl-views-' + [guid]::NewGuid().ToString('N'))
   $Script:AppDir = $viewRoot
   $viewJson = '{"schemaVersion":2,"name":"ansicht-1","projectId":"proj-alpha","templateId":"tpl-1","pieceId":null,"models":[{"name":"Gehaeuse.prt","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","enabled":true}],"labelSize":"small","controls":[{"id":"ctl-1","objectName":"Objekt 1","name":"Merkmal A","color":"#2456b5","selected":true}],"placements":{"ctl-1":{"color":"#2456b5","anchor":{"kind":"geometry","geometryId":"geo-1","mode":"contour","point":{"x":1,"y":2,"z":3}}}},"geometries":[],"camera":null}'
@@ -731,6 +976,23 @@ function Invoke-SelfTest {
   $bad = $false
   try { Safe-ViewName '..\evil' | Out-Null } catch { $bad = $true }
   if (-not $bad) { throw 'Pfad in der Ansicht war erlaubt' }
+  $Script:MockJson = { param($Url) return (Get-LiveMock $Url) }
+  $viewB = '{"schemaVersion":2,"name":"ansicht-b","projectId":"proj-1","projectName":"Projekt Eins","templateId":"tpl-b","templateName":"Stand B","pieceId":null,"pollSeconds":30,"controls":[{"id":"ctl-b1","objectName":"Objekt B","name":"Merkmal B","nominal":1,"usl":1.1,"lsl":0.9,"selected":true},{"id":"ctl-a1","objectName":"Objekt A","name":"Merkmal A","nominal":3,"usl":3.1,"lsl":2.9,"selected":false}],"placements":{},"geometries":[],"models":[]}'
+  Save-View $viewB
+  $live = Get-LiveResponse @{ view = 'ansicht-b'; top = '10' }
+  $liveJson = ConvertTo-PlainJson $live
+  if ($liveJson -match 'ctl-a1' -or $liveJson -match 'piece-a' -or $liveJson -match 'zyl-a-dm' -or $liveJson -match 'ctl-b2') { throw "Vorlage mischt fremde Merkmale: $liveJson" }
+  if ($liveJson -notmatch 'ctl-b1' -or $liveJson -notmatch 'piece-b' -or $liveJson -notmatch 'tpl-b') { throw 'Gewaehltes Merkmal fehlt' }
+  if ($live.stale) { throw 'Frische Live-Antwort ist veraltet' }
+  $loose = Get-LiveResponse @{ project = 'proj-1'; piece = 'piece-loose'; controls = 'ctl-u1,ctl-u2'; top = '20' }
+  $looseJson = ConvertTo-PlainJson $loose
+  if ($looseJson -notmatch 'piece-loose' -or $looseJson -notmatch 'piece-same') { throw 'Gleiche Kontrollmenge fehlt' }
+  if ($looseJson -match 'piece-other' -or $looseJson -match 'piece-oldsnap' -or $looseJson -match 'ctl-x' -or $looseJson -match 'tpl-b') { throw "Teile ohne Vorlage vermischt: $looseJson" }
+  $Script:MockJson = { param($Url) throw 'offline' }
+  $stale = Get-LiveResponse @{ view = 'ansicht-b'; top = '10' }
+  if (-not $stale.stale) { throw 'Cache wird nicht als veraltet markiert' }
+  $staleJson = ConvertTo-PlainJson $stale
+  if ($staleJson -notmatch 'ctl-b1' -or $staleJson -match 'ctl-a1' -or $staleJson -match 'zyl-a-dm') { throw 'Veralteter Cache ist falsch' }
   Remove-Item -Recurse -Force $viewRoot
   Write-Host 'SelfTest OK'
 }

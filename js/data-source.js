@@ -49,6 +49,7 @@ export function normalizeMeasurements(raw) {
     characteristics,
     features,
     fetchedAt: raw.fetchedAt ? String(raw.fetchedAt) : "",
+    stale: Boolean(raw.stale),
   };
 }
 

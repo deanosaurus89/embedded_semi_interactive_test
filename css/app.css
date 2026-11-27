@@ -84,6 +84,7 @@ button, select { font: inherit; }
 .badge.is-live { background: #7dcea0; }
 .badge.is-draft { background: #f6d98a; }
 .badge.is-published { background: #d5deea; }
+.badge.is-stale { background: #f0b429; color: #1b2330; }
 
 .tools {
   margin-left: auto;
