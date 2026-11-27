@@ -51,7 +51,7 @@ button, select { font: inherit; }
   background: var(--toolbar);
   color: #f4f7fb;
   color-scheme: dark;
-  z-index: 2;
+  z-index: 40;
 }
 
 .toolbar h1 {
@@ -272,6 +272,39 @@ body.is-editing .flag.is-unassigned::after {
   font-size: 11px;
 }
 .flag .spark, .flag .spark .pt, .flag .spark .bar { pointer-events: auto; cursor: crosshair; }
+#timeline {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 6px 12px;
+  background: #fff;
+  border-bottom: 1px solid #d5dbe3;
+}
+#timeline[hidden] { display: none; }
+#timeline-bars { display: flex; align-items: flex-end; gap: 2px; height: 48px; flex: 1; }
+#timeline-bars button {
+  flex: 1 1 4px;
+  min-width: 3px;
+  padding: 0;
+  border: 0;
+  background: #9db4d4;
+  cursor: pointer;
+}
+#timeline-bars button.is-on { background: #2456b5; }
+#range-note, #timeline-total { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.assign-modes { display: flex; gap: 8px; margin: 0 0 8px; }
+.assign-modes button, #assign-next, #assign-done, #editor-close {
+  font: inherit;
+  border: 1px solid #c5ccd6;
+  background: #fff;
+  border-radius: 4px;
+  padding: 8px 10px;
+  cursor: pointer;
+}
+.assign-modes button.is-on { background: #1b2330; color: #fff; border-color: #1b2330; }
+#assign-step { margin: 0 0 4px; font-size: 16px; }
+#geometry-type-wrap[hidden] { display: none; }
+#editor-close { float: right; }
 #chart-tip {
   position: fixed;
   z-index: 20;

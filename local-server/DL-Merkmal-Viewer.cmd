@@ -6,7 +6,7 @@ exit /b
 $ErrorActionPreference = 'Stop'
 if (-not $env:LOCALAPPDATA) { $env:LOCALAPPDATA = [IO.Path]::GetTempPath() }
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
-$Script:Version = '0.8.0'
+$Script:Version = '0.9.0'
 $Script:AppDir = Join-Path $env:LOCALAPPDATA 'DL-Merkmal-Viewer'
 $Script:SettingsFile = Join-Path $Script:AppDir 'settings.json'
 $Script:CacheDir = Join-Path $Script:AppDir 'cache'
@@ -22,7 +22,7 @@ $Script:MockSizes = $null
 $Script:MockCalls = 0
 $Script:LastUrl = ''
 $Script:StaticFiles = @(
-  'index.html','css/app.css','js/app.js','js/wizard.js','js/anchors.js','js/views.js','js/data-source.js','js/geometry.js','js/label-template.js','js/fit.js','js/mesh-select.js','js/tumble-controls.js','js/tumble.js','js/mw-vec.js','js/pointertap.js','js/viewsnap.js','js/viewcube.js','js/polyline.js','data/layout.json','data/example-measurements.json','models/milkyway.obj'
+  'index.html','css/app.css','js/app.js','js/wizard.js','js/anchors.js','js/views.js','js/labels.js','js/data-source.js','js/geometry.js','js/label-template.js','js/fit.js','js/mesh-select.js','js/tumble-controls.js','js/tumble.js','js/mw-vec.js','js/pointertap.js','js/viewsnap.js','js/viewcube.js','js/polyline.js','data/layout.json','data/example-measurements.json','models/milkyway.obj'
 )
 
 function As-One($v) {
@@ -57,7 +57,7 @@ function Write-Utf8Text([string]$Path, [string]$Text) {
 }
 function Write-Log([string]$Text) {
   try {
-    $path = Join-Path $Script:AppDir 'logs\helper.log'
+    $path = Join-Path $Script:AppDir 'log.txt'
     $dir = Split-Path -Parent $path
     if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null }
     Add-Content -LiteralPath $path -Value ("{0} {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Text) -Encoding ASCII
@@ -197,23 +197,33 @@ function Get-ODataCount([string]$Path, [hashtable]$Params) {
   $copy = @{}
   foreach ($key in @($Params.Keys)) { $copy[$key] = $Params[$key] }
   $copy['$count'] = 'true'
-  $copy['$top'] = '1'
-  $json = Invoke-DlGet (Build-Url $Path $copy)
-  if ($json -and ($json.PSObject.Properties.Name -contains '@odata.count') -and $null -ne $json.'@odata.count') { return [int]$json.'@odata.count' }
-  return @(Get-Rows $json).Count
+  $copy['$top'] = '0'
+  $Script:LastCountUrl = Build-Url $Path $copy
+  $json = Invoke-DlGet $Script:LastCountUrl
+  if ((Has-Prop $json '@odata.count') -and $null -ne $json.'@odata.count') { return [int]$json.'@odata.count' }
+  return 0
 }
 function Get-PieceTemplates([string]$ProjectId) {
-  $json = $null
-  try { $json = Invoke-DlGet (Build-Url '/InspectorPieceTemplates' @{ '$filter' = "inspectorProject/id eq $ProjectId"; '$orderby' = 'name' }) } catch { $json = $null }
-  $rows = @(Get-Rows $json)
+  $rows = New-List
+  $skip = 0
+  for ($guard = 0; $guard -lt 40; $guard++) {
+    $json = $null
+    try {
+      $json = Invoke-DlGet (Build-Url '/InspectorPieceTemplates' @{ '$filter' = "inspectorProject/id eq $ProjectId"; '$orderby' = 'name'; '$top' = '50'; '$skip' = [string]$skip })
+    } catch { $json = $null }
+    $batch = Get-Rows $json
+    $n = 0
+    foreach ($row in $batch) { [void]$rows.Add($row); $n++ }
+    if ($n -lt 50) { break }
+    $skip += 50
+  }
   if ($rows.Count -eq 0) {
     try {
       $project = Invoke-DlGet ((Get-ApiBase) + "/InspectorProjects/$ProjectId" + '?$expand=inspectorPieceTemplates')
       if ($project -and $project.inspectorPieceTemplates) {
-        $rows = @()
-        foreach ($row in @($project.inspectorPieceTemplates)) { if ($null -ne $row) { $rows += $row } }
+        foreach ($row in @($project.inspectorPieceTemplates)) { if ($null -ne $row) { [void]$rows.Add($row) } }
       }
-    } catch { $rows = @() }
+    } catch { }
   }
   $items = New-List
   foreach ($row in $rows) {
@@ -260,6 +270,15 @@ function Get-PieceModels([string]$PieceId) {
   }
   return @{ items = $items }
 }
+function Control-Label($objectName, $name, $id) {
+  $o = As-Str $objectName
+  $n = As-Str $name
+  if ($o -and $n) { return ($o + ' / ' + $n) }
+  $short = As-Str $id
+  if ($short.Length -gt 8) { $short = $short.Substring(0, 8) }
+  if (-not $short) { $short = '?' }
+  return ('unbenannt (' + $short + ')')
+}
 function Convert-Control($c) {
   $low = $null
   $up = $null
@@ -269,13 +288,25 @@ function Convert-Control($c) {
   }
   $nominal = $null
   if ($null -ne $c.nominal) { $nominal = $c.nominal }
-  return @{ id = (As-Str $c.id); objectName = (As-Str $c.objectName); name = (As-Str $c.name); type = (As-Str $c.type); nominal = $nominal; tolerances = @{ low = $low; up = $up } }
+  $id = As-Str $c.id
+  $objectName = As-Str $c.objectName
+  $name = As-Str $c.name
+  return @{ id = $id; objectName = $objectName; name = $name; type = (As-Str $c.type); nominal = $nominal; tolerances = @{ low = $low; up = $up }; label = (Control-Label $objectName $name $id) }
+}
+function Merge-Control($byId, $c) {
+  $id = As-Str $c.id
+  if (-not $id) { return }
+  $named = (As-Str $c.objectName) -and (As-Str $c.name)
+  if (-not $byId.ContainsKey($id)) { $byId[$id] = $c; return }
+  $prev = $byId[$id]
+  $prevNamed = (As-Str $prev.objectName) -and (As-Str $prev.name)
+  if ($named -and -not $prevNamed) { $byId[$id] = $c }
 }
 function Get-NamedControls([string]$TemplateId, [string]$PieceId) {
   $items = New-List
   if ($PieceId) {
     $json = Invoke-DlGet (Build-Url '/Controls' @{ '$filter' = "inspectorPiece/id eq $PieceId" })
-    foreach ($c in @(Get-Rows $json)) { [void]$items.Add((Convert-Control $c)) }
+    foreach ($c in (Get-Rows $json)) { [void]$items.Add((Convert-Control $c)) }
     return @{ items = $items }
   }
   if (-not $TemplateId) { throw 'templateId oder pieceId fehlt' }
@@ -289,20 +320,27 @@ function Get-NamedControls([string]$TemplateId, [string]$PieceId) {
     $id = As-Str $node.id
     if ($id) { [void]$formIds.Add($id) }
   }
-  $sample = Invoke-DlGet (Build-Url '/InspectorPieces' @{ '$filter' = "inspectorPieceTemplate/id eq $TemplateId"; '$orderby' = 'creationDateUser desc'; '$top' = '1'; '$select' = 'id' })
-  $sampleId = ''
-  foreach ($row in @(Get-Rows $sample)) { if (-not $sampleId) { $sampleId = As-Str $row.id } }
+  $sample = Invoke-DlGet (Build-Url '/InspectorPieces' @{ '$filter' = "inspectorPieceTemplate/id eq $TemplateId"; '$orderby' = 'creationDateUser desc'; '$top' = '20'; '$select' = 'id' })
   $byId = @{}
-  if ($sampleId) {
-    $controls = Invoke-DlGet (Build-Url '/Controls' @{ '$filter' = "inspectorPiece/id eq $sampleId" })
-    foreach ($c in @(Get-Rows $controls)) { $byId[(As-Str $c.id)] = $c }
+  foreach ($row in (Get-Rows $sample)) {
+    $complete = $true
+    if ($formIds.Count -gt 0) {
+      foreach ($id in $formIds) {
+        if (-not $byId.ContainsKey($id)) { $complete = $false; break }
+        $known = $byId[$id]
+        if (-not ((As-Str $known.objectName) -and (As-Str $known.name))) { $complete = $false; break }
+      }
+    }
+    if ($complete -and $formIds.Count -gt 0) { break }
+    $controls = Invoke-DlGet (Build-Url '/Controls' @{ '$filter' = "inspectorPiece/id eq $(As-Str $row.id)" })
+    foreach ($c in (Get-Rows $controls)) { Merge-Control $byId $c }
   }
   if ($formIds.Count -eq 0) {
     foreach ($key in @($byId.Keys)) { [void]$items.Add((Convert-Control $byId[$key])) }
   } else {
     foreach ($id in $formIds) {
       if ($byId.ContainsKey($id)) { [void]$items.Add((Convert-Control $byId[$id])) }
-      else { [void]$items.Add(@{ id = $id; objectName = ''; name = ''; type = ''; nominal = $null; tolerances = @{ low = $null; up = $null } }) }
+      else { [void]$items.Add(@{ id = $id; objectName = ''; name = ''; type = ''; nominal = $null; tolerances = @{ low = $null; up = $null }; label = (Control-Label '' '' $id) }) }
     }
   }
   return @{ items = $items }
@@ -649,6 +687,49 @@ function Get-LiveResponse($q) {
     return $cached
   }
 }
+function Add-DayCount($buckets, [string]$stamp) {
+  if ($stamp.Length -lt 10) { return }
+  $day = $stamp.Substring(0, 10)
+  if ($day -notmatch '^\d{4}-\d{2}-\d{2}$') { return }
+  if (-not $buckets.ContainsKey($day)) { $buckets[$day] = 0 }
+  $buckets[$day] = [int]$buckets[$day] + 1
+}
+function Get-Timeline($q) {
+  $project = ''; $template = ''; $piece = ''
+  if ($q.Contains('view') -and [string]$q['view']) {
+    $raw = Read-View ([string]$q['view'])
+    if (-not $raw) { throw 'Ansicht fehlt' }
+    $view = $raw | ConvertFrom-Json
+    $project = As-Str $view.projectId
+    $template = As-Str $view.templateId
+    $piece = As-Str $view.pieceId
+  } else {
+    if ($q.Contains('project')) { $project = [string]$q['project'] }
+    if ($q.Contains('template')) { $template = [string]$q['template'] }
+    if ($q.Contains('piece')) { $piece = [string]$q['piece'] }
+  }
+  if (-not $project) { throw 'Projekt fehlt' }
+  if ($template) { $filter = Build-PieceFilter $project $template '' '' }
+  else { $filter = (Build-PieceFilter $project '' '' '') + ' and inspectorPieceTemplate eq null' }
+  $buckets = @{}
+  $total = 0
+  $skip = 0
+  for ($guard = 0; $guard -lt 40; $guard++) {
+    $json = Invoke-DlGet (Build-Url '/InspectorPieces' @{ '$filter' = $filter; '$select' = 'creationDateUser'; '$orderby' = 'creationDateUser'; '$top' = '200'; '$skip' = [string]$skip })
+    $batch = Get-Rows $json
+    $n = 0
+    foreach ($row in $batch) {
+      $n++
+      $total++
+      Add-DayCount $buckets (As-Str $row.creationDateUser)
+    }
+    if ($n -lt 200) { break }
+    $skip += 200
+  }
+  $days = New-List
+  foreach ($day in @($buckets.Keys | Sort-Object)) { [void]$days.Add(@{ date = [string]$day; count = [int]$buckets[$day] }) }
+  return @{ total = $total; buckets = $days }
+}
 function Handle-Api($ctx, [string]$Method, [string]$Path) {
   if ($Path -eq '/api/version' -and $Method -eq 'GET') { Send-Json $ctx 200 @{ name = 'DL-Merkmal-Viewer'; version = $Script:Version }; return }
   if ($Path -eq '/api/settings') {
@@ -665,6 +746,7 @@ function Handle-Api($ctx, [string]$Method, [string]$Path) {
   }
   $q = Read-Query $ctx
   if ($Path -eq '/api/live' -and $Method -eq 'GET') { Send-Json $ctx 200 (Get-LiveResponse $q); return }
+  if ($Path -eq '/api/timeline' -and $Method -eq 'GET') { Send-Json $ctx 200 (Get-Timeline $q); return }
   if ($Path -eq '/api/projects' -and $Method -eq 'GET') {
     $top = 20; $skip = 0
     if ($q.Contains('top')) { [void][int]::TryParse([string]$q['top'], [ref]$top) }
@@ -813,10 +895,23 @@ function Ensure-Cache {
   }
   $Script:Www = $web
 }
+function Install-WinFormsGuard {
+  try {
+    Add-Type -AssemblyName System.Windows.Forms
+    [System.Windows.Forms.Application]::SetUnhandledExceptionMode('CatchException')
+    $handler = [System.Threading.ThreadExceptionEventHandler] {
+      param($sender, $e)
+      try { Write-Log $e.Exception.ToString() } catch {}
+    }
+    [System.Windows.Forms.Application]::add_ThreadException($handler)
+  } catch { Write-Log $_.Exception.Message }
+}
 function Show-Status {
+  Install-WinFormsGuard
   Add-Type -AssemblyName System.Windows.Forms
   Add-Type -AssemblyName System.Drawing
   $f = New-Object Windows.Forms.Form
+  $Script:StatusForm = $f
   $f.Text = "DL-Merkmal-Viewer $($Script:Version)"
   $f.FormBorderStyle = 'FixedDialog'
   $f.StartPosition = 'CenterScreen'
@@ -826,9 +921,14 @@ function Show-Status {
   $open = New-Object Windows.Forms.Button -Property @{ Text = 'Im Browser oeffnen'; Left = 12; Top = 70; Width = 160 }
   $quit = New-Object Windows.Forms.Button -Property @{ Text = 'Beenden'; Left = 180; Top = 70; Width = 100 }
   $f.Controls.AddRange(@($label, $open, $quit))
-  $open.Add_Click({ Start-Process 'http://localhost:8765/' })
-  $quit.Add_Click({ $Script:Stop = $true; $f.Close() })
-  $f.Add_FormClosed({ $Script:Stop = $true })
+  $open.Add_Click({ try { Start-Process 'http://localhost:8765/' } catch { Write-Log $_.Exception.Message } })
+  $quit.Add_Click({
+    try {
+      $Script:Stop = $true
+      if ($Script:StatusForm) { $Script:StatusForm.Close() }
+    } catch { Write-Log $_.Exception.Message }
+  })
+  $f.Add_FormClosed({ try { $Script:Stop = $true } catch { Write-Log $_.Exception.Message } })
   $f.Show()
   return $f
 }
@@ -836,23 +936,28 @@ function Start-ServerLoop {
   $listener = New-Object System.Net.HttpListener
   $listener.Prefixes.Add('http://localhost:8765/')
   $listener.Start()
-  $form = Show-Status
-  if (-not $env:DL_NO_BROWSER) { Start-Process 'http://localhost:8765/' }
+  $form = $null
+  try { $form = Show-Status } catch { Write-Log $_.Exception.Message }
+  if (-not $env:DL_NO_BROWSER) { try { Start-Process 'http://localhost:8765/' } catch { Write-Log $_.Exception.Message } }
   while (-not $Script:Stop) {
-    [Windows.Forms.Application]::DoEvents()
-    $async = $listener.BeginGetContext($null, $null)
-    while (-not $async.IsCompleted -and -not $Script:Stop) {
-      [Windows.Forms.Application]::DoEvents()
-      if ($async.AsyncWaitHandle.WaitOne(40)) { break }
-    }
-    if ($Script:Stop -or -not $async.IsCompleted) { continue }
-    $ctx = $null
-    try { $ctx = $listener.EndGetContext($async) } catch { continue }
-    try { Handle-Request $ctx } catch { Write-Log $_.Exception.Message; try { Send-Json $ctx 500 @{ error = 'Fehler' } } catch {} }
-    finally { try { $ctx.Response.OutputStream.Close() } catch {} }
+    try {
+      if ($form) { [Windows.Forms.Application]::DoEvents() }
+      $async = $listener.BeginGetContext($null, $null)
+      if (-not $async) { continue }
+      while (-not $async.IsCompleted -and -not $Script:Stop) {
+        if ($form) { [Windows.Forms.Application]::DoEvents() }
+        if ($async.AsyncWaitHandle.WaitOne(40)) { break }
+      }
+      if ($Script:Stop -or -not $async.IsCompleted) { continue }
+      $ctx = $null
+      try { $ctx = $listener.EndGetContext($async) } catch { continue }
+      if (-not $ctx) { continue }
+      try { Handle-Request $ctx } catch { Write-Log $_.Exception.Message; try { Send-Json $ctx 500 @{ error = 'Fehler' } } catch {} }
+      finally { try { if ($ctx.Response) { $ctx.Response.OutputStream.Close() } } catch {} }
+    } catch { Write-Log $_.Exception.Message }
   }
-  $listener.Stop(); $listener.Close()
-  if ($form) { $form.Dispose() }
+  try { $listener.Stop(); $listener.Close() } catch { Write-Log $_.Exception.Message }
+  try { if ($Script:StatusForm) { $Script:StatusForm.Dispose() } } catch { Write-Log $_.Exception.Message }
 }
 function Get-MockBody([string]$Url) {
   $Url = [Uri]::UnescapeDataString($Url)
@@ -868,6 +973,22 @@ function Get-MockBody([string]$Url) {
   if ($Url -match 'inspectorPiece/id eq piece-loose') { return '{"value":[{"id":"ctl-9","objectName":"Flaeche","name":"Ebenheit","type":"Flatness","nominal":0,"tolerance":{"low":0,"up":0.05}}]}' }
   if ($Url -match 'inspectorPiece/id eq piece-a') { return '{"value":[{"id":"ctl-1","objectName":"Objekt 1","name":"Merkmal A","type":"Distance","nominal":10,"tolerance":{"low":-0.1,"up":0.2}},{"id":"ctl-2","objectName":"Objekt 2","name":"Merkmal B","type":"Angle","nominal":90,"tolerance":{"low":-0.5,"up":0.5}}]}' }
   if ($Url -match 'InspectorPieces') { return '{"value":[]}' }
+  return '{"value":[]}'
+}
+function Get-TwoTemplateMock([string]$Url) {
+  $Url = [Uri]::UnescapeDataString($Url)
+  if ($Url -match 'InspectorPieceTemplates') { return '{"value":[{"id":"tpl-a","name":"Stand A"},{"id":"tpl-b","name":"Stand B"}]}' }
+  if ($Url -match '\$count=true' -and $Url -match 'tpl-a') { return '{"@odata.count":400,"value":[]}' }
+  if ($Url -match '\$count=true' -and $Url -match 'tpl-b') { return '{"@odata.count":635,"value":[]}' }
+  if ($Url -match '\$select=id') { return '{"value":[{"id":"piece-sample"}]}' }
+  return '{"value":[]}'
+}
+function Get-NameMock([string]$Url) {
+  $Url = [Uri]::UnescapeDataString($Url)
+  if ($Url -match '/Form') { return '{"controls":[{"id":"ctl-1"},{"id":"ctl-2"},{"id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}]}' }
+  if ($Url -match '\$select=id') { return '{"value":[{"id":"piece-new"},{"id":"piece-old"}]}' }
+  if ($Url -match 'piece-new') { return '{"value":[{"id":"ctl-1","objectName":"Langloch 1","name":"Mating Length 1","type":"Distance","nominal":10,"tolerance":{"low":-0.1,"up":0.1}}]}' }
+  if ($Url -match 'piece-old') { return '{"value":[{"id":"ctl-2","objectName":"Zylinder 4","name":"Position 1","type":"Position","nominal":0,"tolerance":{"low":-0.2,"up":0.2}}]}' }
   return '{"value":[]}'
 }
 function Get-LiveMock([string]$Url) {
@@ -954,6 +1075,25 @@ function Invoke-SelfTest {
   if ($named.items.Count -ne 2 -or $named.items[0].objectName -ne 'Objekt 1' -or $named.items[0].id -ne 'ctl-1') { throw 'Vorlagen-Merkmale falsch' }
   $loose = Get-NamedControls '' 'piece-loose'
   if ($loose.items.Count -ne 1 -or $loose.items[0].name -ne 'Ebenheit') { throw 'Teil-Merkmale falsch' }
+  $Script:MockJson = { param($Url) return (Get-TwoTemplateMock $Url) }
+  $two = Get-PieceTemplates 'proj-two'
+  if ($two.items.Count -ne 2) { throw 'Zwei Vorlagen erwartet' }
+  $byName = @{}
+  foreach ($item in $two.items) { $byName[(As-Str $item.name)] = [int]$item.pieceCount }
+  if ($byName['Stand A'] -ne 400 -or $byName['Stand B'] -ne 635) { throw 'Teilezahl ist gedeckelt' }
+  if (([Uri]::UnescapeDataString([string]$Script:LastCountUrl)) -notmatch '\$top=0') { throw 'Zaehlung nutzt nicht top=0' }
+  $Script:MockJson = { param($Url) return (Get-NameMock $Url) }
+  $namedMany = Get-NamedControls 'tpl-names' ''
+  if ($namedMany.items.Count -ne 3) { throw 'Drei Merkmale erwartet' }
+  $labels = @{}
+  foreach ($item in $namedMany.items) { $labels[(As-Str $item.id)] = As-Str $item.label }
+  if ($labels['ctl-1'] -ne 'Langloch 1 / Mating Length 1') { throw 'Erster Name falsch' }
+  if ($labels['ctl-2'] -ne 'Zylinder 4 / Position 1') { throw 'Name aus weiterem Teil fehlt' }
+  if ($labels['aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'] -notmatch '^unbenannt \(aaaaaaaa\)') { throw 'Unbenanntes Merkmal zeigt eine UUID' }
+  $Script:MockJson = { param($Url) return (Get-MockBody $Url) }
+  if ($launch -and (([IO.File]::ReadAllText($launch)) -notmatch 'SetUnhandledExceptionMode')) { throw 'Kein globaler Fehlerhandler' }
+  if ($launch -and (([IO.File]::ReadAllText($launch)) -notmatch 'log.txt')) { throw 'log.txt fehlt' }
+  if ($launch -and (([IO.File]::ReadAllText($launch)) -notmatch 'Script:StatusForm')) { throw 'Fenster wird als Null geschlossen' }
   $listener = New-Object System.Net.HttpListener
   $listener.Prefixes.Add('http://127.0.0.1:8778/')
   $listener.Start()
@@ -964,7 +1104,7 @@ function Invoke-SelfTest {
   try { $ctx.Response.OutputStream.Close() } catch {}
   $body = $task.Result.Content.ReadAsStringAsync().Result
   $listener.Stop(); $listener.Close()
-  if ($body -notmatch '"version":"0.8.0"') { throw "Version falsch: $body" }
+  if ($body -notmatch '"version":"0.9.0"') { throw "Version falsch: $body" }
   $viewRoot = Join-Path ([IO.Path]::GetTempPath()) ('dl-views-' + [guid]::NewGuid().ToString('N'))
   $Script:AppDir = $viewRoot
   $viewJson = '{"schemaVersion":2,"name":"ansicht-1","projectId":"proj-alpha","templateId":"tpl-1","pieceId":null,"models":[{"name":"Gehaeuse.prt","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","enabled":true}],"labelSize":"small","controls":[{"id":"ctl-1","objectName":"Objekt 1","name":"Merkmal A","color":"#2456b5","selected":true}],"placements":{"ctl-1":{"color":"#2456b5","anchor":{"kind":"geometry","geometryId":"geo-1","mode":"contour","point":{"x":1,"y":2,"z":3}}}},"geometries":[],"camera":null}'

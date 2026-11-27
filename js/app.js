@@ -22,6 +22,7 @@ import { buildMesh } from "./mesh-select.js";
 import { startWizard } from "./wizard.js";
 import { centerPoint, constrainToContour, distancePointToTriangle, footOnFeature, nearestFoot } from "./anchors.js";
 import { viewDocument } from "./views.js";
+import { controlLabel } from "./labels.js";
 
 // Anchors and geometries are stored in the original OBJ coordinate system.
 // The mesh is not moved, so a raycast hit can be saved as-is.
@@ -40,7 +41,7 @@ const UI = {
   webglError: "WebGL ist in diesem Browser nicht verfügbar.",
   emptyModel: "Das Modell enthält keine Flächen.",
   hint: "Linke Maustaste dreht die Ansicht, ein kurzer Klick setzt einen Punkt. Mittlere und rechte Maustaste verschieben. Das Mausrad zoomt.",
-  pickFirst: "Zuerst ein Fähnchen auswählen.",
+  pickFirst: "Zuerst ein Merkmal in der Liste oder ein Fähnchen wählen.",
   pickMiss: "Kein Treffer auf der Oberfläche.",
   anchorSet: "Fußpunkt gesetzt.",
   geoMade: "Geometrie erzeugt.",
@@ -101,6 +102,18 @@ const els = {
   geoOpacity: document.getElementById("geo-opacity"),
   geoAttach: document.getElementById("geo-attach"),
   footMode: document.getElementById("foot-mode"),
+  assignStep: document.getElementById("assign-step"),
+  assignName: document.getElementById("assign-name"),
+  modePoint: document.getElementById("mode-point"),
+  modeGeometry: document.getElementById("mode-geometry"),
+  geometryTypeWrap: document.getElementById("geometry-type-wrap"),
+  assignNext: document.getElementById("assign-next"),
+  assignDone: document.getElementById("assign-done"),
+  editorClose: document.getElementById("editor-close"),
+  timeline: document.getElementById("timeline"),
+  timelineBars: document.getElementById("timeline-bars"),
+  timelineTotal: document.getElementById("timeline-total"),
+  rangeNote: document.getElementById("range-note"),
   colorPalette: document.getElementById("color-palette"),
   viewSave: document.getElementById("view-save"),
   viewOpen: document.getElementById("view-open"),
@@ -332,7 +345,7 @@ async function startAuthor(params) {
       toast(error.message || "Ansicht nicht geladen");
     }
   }
-  startWizard({ apply: applyAuthorSelection });
+  startWizard({ apply: applyAuthorSelection, previewModels: (models) => loadHashedModels(models, false) });
 }
 
 async function applyAuthorSelection(selection) {
@@ -388,6 +401,7 @@ async function applyAuthorSelection(selection) {
     if (state.saved) state.saved.labelTemplate.size = "S";
     renderFlags();
   }
+  if (state.setup) state.saved = clone(state.setup);
   if (els.wizard) els.wizard.hidden = true;
   frameModel(state.model, null);
   cameraIsSaved = false;
@@ -403,7 +417,7 @@ function characteristicFromControl(control) {
   const hasNominal = Number.isFinite(nominal);
   const lowN = Number.isFinite(low) ? low : 0;
   const upN = Number.isFinite(up) ? up : 0;
-  const title = control.objectName ? `${control.objectName} / ${control.name}` : control.name || control.id;
+  const title = controlLabel(control);
   return {
     id: String(control.id),
     name: title,
@@ -502,7 +516,7 @@ function bindUi() {
   });
   els.reconnect.addEventListener("click", () => {
     if (!state.selectedId) {
-      toast(UI.pickFirst);
+      setStatus(UI.pickFirst);
       return;
     }
     state.reconnect = true;
@@ -517,6 +531,7 @@ function bindUi() {
   els.resetBtn.addEventListener("click", onResetClick);
   els.tool.addEventListener("change", () => {
     state.tool = els.tool.value;
+    updateAssignHeader();
     state.draftPoints = [];
     resetPicks();
     updatePlaneUi();
@@ -549,8 +564,20 @@ function bindUi() {
   els.charSelect.addEventListener("change", () => {
     state.selectedId = els.charSelect.value || null;
     markSelection();
+    updateAssignHeader();
     updateHint();
     updateLeaders();
+  });
+  if (els.modePoint) els.modePoint.addEventListener("click", () => setAssignMode("point"));
+  if (els.modeGeometry) els.modeGeometry.addEventListener("click", () => setAssignMode("geometry"));
+  if (els.assignNext) els.assignNext.addEventListener("click", () => selectNextMerkmal());
+  if (els.assignDone) els.assignDone.addEventListener("click", () => finishEdit());
+  if (els.editorClose) els.editorClose.addEventListener("click", () => finishEdit());
+  window.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || !state.edit) return;
+    const tag = event.target?.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+    finishEdit();
   });
   els.charList.addEventListener("click", (event) => {
     const row = event.target.closest("[data-char]");
@@ -645,7 +672,9 @@ function applyFilter(patch, persist = true) {
     }
   }
   refreshFlagContents();
+  updateRangeNote();
   source?.refresh?.();
+  if (state.holdLayout) pollLiveNow();
 }
 
 function syncViewLock() {
@@ -1087,6 +1116,8 @@ function beginEdit() {
   state.viewLocked = false;
   syncViewLock();
   els.editor.hidden = false;
+  const keys = Object.keys(state.setup?.placements || {});
+  if (!state.selectedId || !keys.includes(state.selectedId)) state.selectedId = keys[0] || null;
   updatePickStatus();
   syncChrome();
   syncEditor();
@@ -1600,6 +1631,7 @@ function onFlagPointerDown(event) {
   event.preventDefault();
   event.stopPropagation();
   state.selectedId = article.dataset.id;
+  updateAssignHeader();
   state.selectedGeometryId = state.setup.placements[state.selectedId]?.anchor?.geometryId || null;
   markSelection();
   syncEditor();
@@ -1917,7 +1949,7 @@ function onSurfaceClick(hit) {
   }
   if (state.tool === "point") {
     if (!state.selectedId) {
-      toast(UI.pickFirst);
+      setStatus(UI.pickFirst);
       return;
     }
     const picked = capturePick(hit);
@@ -1928,7 +1960,7 @@ function onSurfaceClick(hit) {
     return;
   }
   if (!state.selectedId) {
-    toast(UI.pickFirst);
+    setStatus(UI.pickFirst);
     return;
   }
   if (!state.meshIndex) {
@@ -2733,24 +2765,100 @@ function acceptLive(data) {
   updateLeaders();
 }
 
+function pollLiveNow() {
+  return tickLive();
+}
+
+async function tickLive() {
+  try {
+    const response = await fetch(liveSelectionUrl(), { cache: "no-store" });
+    if (!response.ok) throw new Error(String(response.status));
+    const raw = await response.json();
+    const data = normalizeMeasurements(raw);
+    data.stale = Boolean(raw.stale);
+    acceptLive(data);
+  } catch {
+    updateStand(state.data, true);
+  }
+}
+
 function startLivePoll() {
   state.holdLayout = true;
   window.clearInterval(state.liveTimer);
-  const tick = async () => {
-    try {
-      const response = await fetch(liveSelectionUrl(), { cache: "no-store" });
-      if (!response.ok) throw new Error(String(response.status));
-      const raw = await response.json();
-      const data = normalizeMeasurements(raw);
-      data.stale = Boolean(raw.stale);
-      acceptLive(data);
-    } catch {
-      updateStand(state.data, true);
+  tickLive();
+  loadTimeline();
+  const seconds = Math.max(5, Number(state.liveInterval) || Number(state.setup?.refreshSeconds) || 60);
+  state.liveTimer = window.setInterval(() => { tickLive(); }, seconds * 1000);
+}
+
+function updateRangeNote() {
+  if (!els.rangeNote) return;
+  const count = state.filterCount === "all" ? "alle" : String(state.filterCount || 25);
+  const dates = state.filterFrom || state.filterTo ? `, ${state.filterFrom || "…"} bis ${state.filterTo || "…"}` : "";
+  els.rangeNote.textContent = `Letzte ${count} Teile${dates}`;
+}
+
+async function loadTimeline() {
+  if (!els.timeline || !state.session?.projectId && !state.session?.name) return;
+  const url = new URL("/api/timeline", location.origin);
+  if (state.session.name) url.searchParams.set("view", state.session.name);
+  else {
+    url.searchParams.set("project", state.session.projectId);
+    if (state.session.templateId) url.searchParams.set("template", state.session.templateId);
+    if (state.session.pieceId) url.searchParams.set("piece", state.session.pieceId);
+  }
+  try {
+    const response = await fetch(url.href, { cache: "no-store" });
+    if (!response.ok) return;
+    const body = await response.json();
+    drawTimeline(body);
+  } catch {
+    /* timeline is optional */
+  }
+}
+
+function drawTimeline(body) {
+  if (!els.timeline || !els.timelineBars) return;
+  els.timeline.hidden = false;
+  if (els.timelineTotal) els.timelineTotal.textContent = `${body.total || 0} Teile`;
+  els.timelineBars.replaceChildren();
+  const buckets = body.buckets || [];
+  const max = Math.max(1, ...buckets.map((bucket) => Number(bucket.count) || 0));
+  let dragFrom = null;
+  const paint = (from, to) => {
+    for (const button of els.timelineBars.querySelectorAll("button")) {
+      const day = button.dataset.date;
+      button.classList.toggle("is-on", (!from && !to) || (day >= from && day <= to));
     }
   };
-  tick();
-  const seconds = Math.max(5, Number(state.liveInterval) || Number(state.setup?.refreshSeconds) || 60);
-  state.liveTimer = window.setInterval(() => { tick(); }, seconds * 1000);
+  for (const bucket of buckets) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.dataset.date = bucket.date;
+    button.title = `${bucket.date}: ${bucket.count}`;
+    button.style.height = `${Math.max(4, Math.round((Number(bucket.count) / max) * 48))}px`;
+    button.addEventListener("pointerdown", (event) => {
+      dragFrom = bucket.date;
+      button.setPointerCapture(event.pointerId);
+    });
+    button.addEventListener("pointerenter", () => {
+      if (!dragFrom) return;
+      const end = bucket.date;
+      paint(dragFrom < end ? dragFrom : end, dragFrom < end ? end : dragFrom);
+    });
+    button.addEventListener("pointerup", () => {
+      if (!dragFrom) return;
+      const end = bucket.date;
+      const from = dragFrom < end ? dragFrom : end;
+      const to = dragFrom < end ? end : dragFrom;
+      dragFrom = null;
+      applyFilter({ from, to });
+      paint(from, to);
+    });
+    els.timelineBars.append(button);
+  }
+  paint(state.filterFrom, state.filterTo);
+  updateRangeNote();
 }
 
 function saveNamedView() {
@@ -2835,7 +2943,7 @@ async function loadNamedView(name) {
     features: [],
     characteristics: (view.controls || []).map((control) => ({
       id: String(control.id),
-      name: control.objectName ? `${control.objectName} / ${control.name}` : control.name || control.id,
+      name: controlLabel(control),
       objectName: control.objectName || "",
       controlName: control.name || "",
       unit: control.unit || "mm",
@@ -2995,7 +3103,7 @@ function syncEditor() {
     const option = document.createElement("option");
     option.value = key;
     const characteristic = characteristicFor(key);
-    option.textContent = characteristic?.name || key;
+    option.textContent = characteristic ? controlLabel(characteristic) : key;
     els.charSelect.append(option);
   }
   if (previous && keys.includes(previous)) els.charSelect.value = previous;
@@ -3006,7 +3114,7 @@ function syncEditor() {
     button.type = "button";
     button.dataset.char = characteristic.id;
     const feature = state.data.features.find((item) => item.name === characteristic.objectName);
-    button.textContent = feature?.type ? `${characteristic.name} (${feature.type})` : characteristic.name;
+    button.textContent = feature?.type ? `${controlLabel(characteristic)} (${feature.type})` : controlLabel(characteristic);
     els.charList.append(button);
   }
   const geometry = state.setup.geometries.find((item) => item.id === state.selectedGeometryId);
@@ -3024,6 +3132,26 @@ function syncEditor() {
     highlightPalette(colorForKey(state.selectedId));
   }
   writeTemplateForm();
+  updateAssignHeader();
+}
+
+function setAssignMode(mode) {
+  if (!els.tool) return;
+  if (mode === "point") els.tool.value = "point";
+  else if (els.tool.value === "point") els.tool.value = "Kreis";
+  els.tool.dispatchEvent(new Event("change"));
+  updateAssignHeader();
+}
+
+function selectNextMerkmal() {
+  const keys = Object.keys(state.setup?.placements || {});
+  if (!keys.length) return;
+  const index = Math.max(0, keys.indexOf(state.selectedId));
+  state.selectedId = keys[(index + 1) % keys.length];
+  if (els.charSelect) els.charSelect.value = state.selectedId;
+  markSelection();
+  syncEditor();
+  updateLeaders();
 }
 
 function writeTemplateForm() {
@@ -3113,6 +3241,22 @@ function formatStamp(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return String(value);
   return new Intl.DateTimeFormat("de-DE", { dateStyle: "medium", timeStyle: "short" }).format(date);
+}
+
+function setStatus(message) {
+  if (els.pickStatus) els.pickStatus.textContent = message;
+}
+
+function updateAssignHeader() {
+  const keys = Object.keys(state.setup?.placements || {});
+  const index = Math.max(0, keys.indexOf(state.selectedId));
+  const characteristic = state.selectedId ? characteristicFor(state.selectedId) : null;
+  if (els.assignStep) els.assignStep.textContent = keys.length ? `Merkmal ${index + 1} von ${keys.length}` : "Merkmal";
+  if (els.assignName) els.assignName.textContent = characteristic ? controlLabel(characteristic) : "";
+  const pointMode = !els.tool || els.tool.value === "point";
+  if (els.modePoint) els.modePoint.classList.toggle("is-on", pointMode);
+  if (els.modeGeometry) els.modeGeometry.classList.toggle("is-on", !pointMode);
+  if (els.geometryTypeWrap) els.geometryTypeWrap.hidden = pointMode;
 }
 
 function toast(message) {

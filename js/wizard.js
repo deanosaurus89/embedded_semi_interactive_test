@@ -1,3 +1,5 @@
+import { controlLabel } from "./labels.js";
+
 const LARGE_BYTES = 50 * 1024 * 1024;
 const HUGE_BYTES = 300 * 1024 * 1024;
 
@@ -41,6 +43,7 @@ const picked = {
 };
 
 let onApply = () => {};
+let onPreview = () => {};
 
 export function labelCap(small) {
   return small ? 20 : 10;
@@ -54,8 +57,9 @@ export function formatBytes(bytes) {
   return `${n} B`;
 }
 
-export function startWizard({ apply }) {
+export function startWizard({ apply, previewModels }) {
   onApply = apply;
+  onPreview = previewModels || (() => {});
   els.root.hidden = false;
   showPanel("search");
   els.settingsBtn.addEventListener("click", () => {
@@ -290,6 +294,8 @@ async function showModels(pieceId) {
     els.models.append(item);
   }
   showPanel("models");
+  const chosen = selectedRecords();
+  if (chosen.length) onPreview(chosen).catch((error) => fail(error));
 }
 
 function confirmHuge(models) {
@@ -336,7 +342,7 @@ function renderControls(controls) {
       updateCap();
     });
     const text = document.createElement("span");
-    const title = control.objectName ? `${control.objectName} / ${control.name}` : control.name || control.id;
+    const title = control.label || controlLabel(control);
     text.innerHTML = `${escapeHtml(title)} <span class="meta">${escapeHtml(control.type || "")}</span>`;
     label.append(box, text);
     const item = document.createElement("li");
