@@ -15,10 +15,12 @@ $Script:HostUrl = ''
 $Script:Token = ''
 $Script:PollSeconds = 60
 $Script:LastPieces = 50
+$Script:TemplateId = ''
+$Script:TemplateName = ''
 $Script:PieceCache = @{}
 $Script:Sync = [hashtable]::Synchronized(@{ LiveJson = ''; ModelPath = ''; Status = 'Bereit'; Stop = $false; WantTop = '50'; WantFrom = ''; WantTo = '' })
 $Script:StaticFiles = @(
-  'index.html','css/app.css','js/app.js','js/data-source.js','js/geometry.js','js/label-template.js','js/fit.js','js/mesh-select.js','data/layout.json','data/example-measurements.json','models/milkyway.obj'
+  'index.html','css/app.css','js/app.js','js/data-source.js','js/geometry.js','js/label-template.js','js/fit.js','js/mesh-select.js','js/tumble-controls.js','data/layout.json','data/example-measurements.json','models/milkyway.obj'
 )
 
 function As-One($v) {
@@ -89,6 +91,63 @@ function Search-Workspaces([string]$Term) {
   $rows = @()
   foreach ($item in @((Invoke-DlGet (Build-Url '/Workspaces' $p)).value)) { if ($null -ne $item) { $rows += $item } }
   return $rows
+}
+function Build-PieceFilter([string]$ProjectId, [string]$TemplateId, [string]$From, [string]$To) {
+  $filter = "inspectorProject/id eq $ProjectId"
+  if ($TemplateId) { $filter = $filter + " and inspectorPieceTemplate/id eq $TemplateId" }
+  if ($From -match '^\d{4}-\d{2}-\d{2}$') { $filter = $filter + " and creationDateUser ge ${From}T00:00:00Z" }
+  if ($To -match '^\d{4}-\d{2}-\d{2}$') { $filter = $filter + " and creationDateUser le ${To}T23:59:59Z" }
+  return $filter
+}
+function Get-ODataCount([string]$Path, [hashtable]$Params) {
+  $copy = @{}
+  foreach ($key in @($Params.Keys)) { $copy[$key] = $Params[$key] }
+  $copy['$count'] = 'true'
+  $copy['$top'] = '1'
+  $json = Invoke-DlGet (Build-Url $Path $copy)
+  $count = $json.'@odata.count'
+  if ($null -eq $count) { return @($json.value).Count }
+  return [int]$count
+}
+function Get-PieceTemplates([string]$ProjectId) {
+  $rows = @()
+  try {
+    $rows = @(Get-DlAll '/InspectorPieceTemplates' @{ '$filter' = "inspectorProject/id eq $ProjectId"; '$orderby' = 'name' })
+  } catch { $rows = @() }
+  if ($rows.Count -eq 0) {
+    try {
+      $project = Invoke-DlGet ((Get-ApiBase) + "/InspectorProjects/$ProjectId" + '?$expand=inspectorPieceTemplates')
+      $rows = @($project.inspectorPieceTemplates)
+    } catch { $rows = @() }
+  }
+  $out = @()
+  foreach ($row in $rows) {
+    if ($null -eq $row) { continue }
+    $id = As-Str $row.id
+    if (-not $id) { continue }
+    $count = 0
+    try {
+      $count = Get-ODataCount '/InspectorPieces' @{ '$filter' = "inspectorProject/id eq $ProjectId and inspectorPieceTemplate/id eq $id" }
+    } catch { $count = 0 }
+    $out += [pscustomobject]@{ id = $id; name = (As-Str $row.name); pieceCount = $count }
+  }
+  return $out
+}
+function Get-TemplateControlNames([string]$ProjectId, [string]$TemplateId) {
+  $pieces = @(Get-DlAll '/InspectorPieces' @{
+    '$filter' = "inspectorProject/id eq $ProjectId and inspectorPieceTemplate/id eq $TemplateId"
+    '$orderby' = 'creationDateUser desc'
+    '$top' = '1'
+    '$select' = 'id'
+  })
+  if ($pieces.Count -lt 1 -or $null -eq $pieces[0]) { return @() }
+  $controls = @(Get-DlAll '/Controls' @{ '$filter' = "inspectorPiece/id eq $(As-Str $pieces[0].id)" })
+  $names = @()
+  foreach ($control in $controls) {
+    if ($null -eq $control) { continue }
+    $names += (Get-ControlId $control)
+  }
+  return $names
 }
 function Search-Projects([string]$Mode, [string]$Term) {
   $Term = Normalize-SearchTerm $Term
@@ -179,6 +238,8 @@ function Load-Settings {
   if ($s.server) { $Script:HostUrl = [string]$s.server }
   if ($s.pollSeconds) { $Script:PollSeconds = [int]$s.pollSeconds }
   if ($s.lastPieces) { $Script:LastPieces = [int]$s.lastPieces }
+  if ($s.templateId) { $Script:TemplateId = [string]$s.templateId }
+  if ($s.templateName) { $Script:TemplateName = [string]$s.templateName }
   if (-not $s.tokenProtected) { return $false }
   $sec = ConvertTo-SecureString ([string]$s.tokenProtected)
   $Script:Token = [Runtime.InteropServices.Marshal]::PtrToStringBSTR([Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec))
@@ -187,7 +248,7 @@ function Load-Settings {
 function Save-Settings {
   $enc = ''
   if ($Script:Token) { $enc = [string](ConvertTo-SecureString $Script:Token -AsPlainText -Force | ConvertFrom-SecureString) }
-  $obj = [pscustomobject]@{ server = $Script:HostUrl; tokenProtected = $enc; pollSeconds = $Script:PollSeconds; lastPieces = $Script:LastPieces }
+  $obj = [pscustomobject]@{ server = $Script:HostUrl; tokenProtected = $enc; pollSeconds = $Script:PollSeconds; lastPieces = $Script:LastPieces; templateId = $Script:TemplateId; templateName = $Script:TemplateName }
   Write-Utf8Text $Script:SettingsFile (ConvertTo-Json -InputObject $obj -Depth 4)
 }
 function Get-RowTag($row) {
@@ -242,9 +303,7 @@ function Update-LiveData([string]$ProjectId) {
   if ($Script:Sync.WantTop) { $parsedTop = 0; if ([int]::TryParse([string]$Script:Sync.WantTop, [ref]$parsedTop) -and $parsedTop -gt 0) { $top = $parsedTop } }
   $from = [string]$Script:Sync.WantFrom
   $to = [string]$Script:Sync.WantTo
-  $filter = "inspectorProject/id eq $ProjectId"
-  if ($from -match '^\d{4}-\d{2}-\d{2}$') { $filter = $filter + " and creationDateUser ge ${from}T00:00:00Z" }
-  if ($to -match '^\d{4}-\d{2}-\d{2}$') { $filter = $filter + " and creationDateUser le ${to}T23:59:59Z" }
+  $filter = Build-PieceFilter $ProjectId $Script:TemplateId $from $to
   $pieces = @(Get-DlAll '/InspectorPieces' @{
     '$filter' = $filter
     '$orderby' = 'creationDateUser desc'
@@ -261,7 +320,7 @@ function Update-LiveData([string]$ProjectId) {
     if (-not $Script:PieceCache.Contains($pid)) {
       $controls = @(Get-DlAll '/Controls' @{ '$filter' = "inspectorPiece/id eq $pid" })
       $objects = @()
-      try { $objects = @(Get-DlAll '/MeasurementObjects' @{ '$filter' = "inspectorPiece/id eq $pid"; '$select' = 'id,name,type' }) } catch { $objects = @() }
+      try { $objects = @(Get-DlAll '/MeasurementObjects' @{ '$filter' = "inspectorPiece/id eq $pid" }) } catch { $objects = @() }
       $Script:PieceCache[$pid] = @{ controls = $controls; features = $objects }
     }
     $entry = $Script:PieceCache[$pid]
@@ -297,11 +356,14 @@ function Update-LiveData([string]$ProjectId) {
   $doc = @{
     schemaVersion = 1; source = 'live'; refreshSeconds = $Script:PollSeconds
     fetchedAt = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
-    part = @{ id = $ProjectId; name = $ProjectId }
+    part = @{ id = $ProjectId; name = $ProjectId; template = @{ id = [string]$Script:TemplateId; name = [string]$Script:TemplateName } }
     pieces = @($pieceOut); features = @($featOut); characteristics = @($chars)
   }
   $Script:Sync.LiveJson = ConvertTo-PlainJson $doc
-  $Script:Sync.Status = "Live $(Get-Date -Format 'HH:mm:ss')  ($($pieces.Count) Teile)"
+  $tpl = [string]$Script:TemplateName
+  if (-not $tpl) { $tpl = [string]$Script:TemplateId }
+  if ($tpl) { $Script:Sync.Status = "Live $(Get-Date -Format 'HH:mm:ss')  ($($pieces.Count) Teile, $tpl)" }
+  else { $Script:Sync.Status = "Live $(Get-Date -Format 'HH:mm:ss')  ($($pieces.Count) Teile)" }
 }
 function Update-LiveModel([string]$PieceId) {
   if (-not $PieceId) { return }
@@ -433,7 +495,7 @@ function Show-Main {
   $f = New-Object Windows.Forms.Form
   $f.Text = 'DL-Merkmal-Viewer'
   $f.StartPosition = 'CenterScreen'
-  $f.ClientSize = New-Object Drawing.Size(760, 560)
+  $f.ClientSize = New-Object Drawing.Size(760, 720)
   $f.Font = New-Object Drawing.Font('Segoe UI', 9)
   $bar = New-Object Windows.Forms.FlowLayoutPanel -Property @{ Dock = 'Top'; Height = 40; Padding = '6,6,6,0' }
   $txt = New-Object Windows.Forms.TextBox -Property @{ Width = 220 }
@@ -446,17 +508,25 @@ function Show-Main {
   [void]$grid.Columns.Add('Projekt','Projekt')
   [void]$grid.Columns.Add('Workspace','Workspace')
   $grid.Columns[0].FillWeight = 20
-  $bottom = New-Object Windows.Forms.Panel -Property @{ Dock = 'Bottom'; Height = 170 }
+  $bottom = New-Object Windows.Forms.Panel -Property @{ Dock = 'Bottom'; Height = 330 }
   $watched = New-Object Windows.Forms.Label -Property @{ Left = 12; Top = 8; Width = 720; Text = 'Beobachtet: (noch keins)' }
-  $interval = New-Object Windows.Forms.ComboBox -Property @{ Left = 12; Top = 36; Width = 140; DropDownStyle = 'DropDownList' }
+  $tplLabel = New-Object Windows.Forms.Label -Property @{ Left = 12; Top = 28; Width = 430; Text = 'Stueckvorlage' }
+  $tplGrid = New-Object Windows.Forms.DataGridView -Property @{ Left = 12; Top = 48; Width = 430; Height = 110; ReadOnly = $true; AllowUserToAddRows = $false; SelectionMode = 'FullRowSelect'; MultiSelect = $false; RowHeadersVisible = $false; AutoSizeColumnsMode = 'Fill'; BackgroundColor = 'White' }
+  [void]$tplGrid.Columns.Add('Wahl','')
+  [void]$tplGrid.Columns.Add('Name','Vorlage')
+  [void]$tplGrid.Columns.Add('Teile','Teile')
+  $tplGrid.Columns[0].FillWeight = 18
+  $ctrlLabel = New-Object Windows.Forms.Label -Property @{ Left = 452; Top = 28; Width = 290; Text = 'Merkmale (Objekt / Name)' }
+  $ctrlList = New-Object Windows.Forms.ListBox -Property @{ Left = 452; Top = 48; Width = 290; Height = 110 }
+  $interval = New-Object Windows.Forms.ComboBox -Property @{ Left = 12; Top = 170; Width = 140; DropDownStyle = 'DropDownList' }
   [void]$interval.Items.AddRange(@('30 s','1 min','5 min','15 min'))
   $map = @{ 30 = 0; 60 = 1; 300 = 2; 900 = 3 }
   if ($map.ContainsKey($Script:PollSeconds)) { $interval.SelectedIndex = $map[$Script:PollSeconds] } else { $interval.SelectedIndex = 1 }
-  $open = New-Object Windows.Forms.Button -Property @{ Text = 'Im Browser oeffnen'; Left = 170; Top = 34; Width = 160 }
-  $snippet = New-Object Windows.Forms.TextBox -Property @{ Left = 12; Top = 74; Width = 560; ReadOnly = $true; Text = '<iframe src="http://localhost:8765/" title="Milkyway Merkmale"></iframe>' }
-  $copy = New-Object Windows.Forms.Button -Property @{ Text = 'Kopieren'; Left = 580; Top = 72; Width = 90 }
-  $status = New-Object Windows.Forms.Label -Property @{ Left = 12; Top = 112; Width = 720; Text = 'Bereit' }
-  $bottom.Controls.AddRange(@($watched,$interval,$open,$snippet,$copy,$status))
+  $open = New-Object Windows.Forms.Button -Property @{ Text = 'Im Browser oeffnen'; Left = 170; Top = 168; Width = 160 }
+  $snippet = New-Object Windows.Forms.TextBox -Property @{ Left = 12; Top = 208; Width = 560; ReadOnly = $true; Text = '<iframe src="http://localhost:8765/" title="Milkyway Merkmale"></iframe>' }
+  $copy = New-Object Windows.Forms.Button -Property @{ Text = 'Kopieren'; Left = 580; Top = 206; Width = 90 }
+  $status = New-Object Windows.Forms.Label -Property @{ Left = 12; Top = 246; Width = 720; Height = 70; Text = 'Bereit' }
+  $bottom.Controls.AddRange(@($watched,$tplLabel,$tplGrid,$ctrlLabel,$ctrlList,$interval,$open,$snippet,$copy,$status))
   $f.Controls.Add($grid); $f.Controls.Add($bottom); $f.Controls.Add($bar)
   $renderStars = {
     $cur = Load-Watched
@@ -467,6 +537,48 @@ function Show-Main {
       $row.Cells[0].Value = $(if ($on) { [string]([char]0x2605) } else { [string]([char]0x2606) })
     }
     if ($cur) { $watched.Text = "Beobachtet: $($cur.workspaceName) / $($cur.projectName)" } else { $watched.Text = 'Beobachtet: (noch keins)' }
+  }
+  $markTemplate = {
+    foreach ($row in $tplGrid.Rows) {
+      $tag = Get-RowTag $row
+      $on = $tag -and ((As-Str $tag.id) -eq [string]$Script:TemplateId)
+      $row.Cells[0].Value = $(if ($on) { '*' } else { '' })
+    }
+  }
+  $applyTemplate = {
+    param($tag)
+    if ($null -eq $tag) { return }
+    $Script:TemplateId = As-Str $tag.id
+    $Script:TemplateName = As-Str $tag.name
+    Save-Settings
+    & $markTemplate
+    $ctrlList.Items.Clear()
+    try {
+      $names = @(Get-TemplateControlNames (As-Str (Load-Watched).projectId) $Script:TemplateId)
+      foreach ($name in $names) { if ($name) { [void]$ctrlList.Items.Add([string]$name) } }
+      $status.Text = "$($Script:TemplateName): $($names.Count) Merkmale, $($tag.pieceCount) Teile"
+    } catch { $status.Text = $_.Exception.Message }
+    $cur = Load-Watched
+    if ($cur) { try { Update-LiveData (As-Str $cur.projectId); $status.Text = [string]$Script:Sync.Status } catch { $status.Text = $_.Exception.Message } }
+  }
+  $loadTemplates = {
+    $tplGrid.Rows.Clear()
+    $ctrlList.Items.Clear()
+    $cur = Load-Watched
+    if (-not $cur) { return }
+    try {
+      $status.Text = 'Vorlagen ...'
+      $templates = @(Get-PieceTemplates (As-Str $cur.projectId))
+      $pick = $null
+      $best = -1
+      foreach ($template in $templates) {
+        $i = $tplGrid.Rows.Add('', (As-Str $template.name), [string]$template.pieceCount)
+        $tplGrid.Rows[$i].Tag = $template
+        if ((As-Str $template.id) -eq [string]$Script:TemplateId) { $pick = $template }
+        if ([int]$template.pieceCount -gt $best) { $best = [int]$template.pieceCount; if (-not $pick) { $pick = $template } }
+      }
+      if ($pick) { & $applyTemplate $pick } else { $status.Text = 'Keine Stueckvorlage' }
+    } catch { $status.Text = $_.Exception.Message }
   }
   $search.Add_Click({
     try {
@@ -488,7 +600,13 @@ function Show-Main {
     if ($null -eq $tag) { return }
     Save-Watched $tag
     & $renderStars
-    try { Update-LiveData (As-Str $tag.projectId); $status.Text = [string]$Script:Sync.Status } catch { $status.Text = $_.Exception.Message }
+    & $loadTemplates
+  })
+  $tplGrid.Add_CellClick({
+    if ($_.RowIndex -lt 0) { return }
+    $tag = Get-RowTag $tplGrid.Rows[$_.RowIndex]
+    if ($null -eq $tag) { return }
+    & $applyTemplate $tag
   })
   $interval.Add_SelectedIndexChanged({
     $Script:PollSeconds = @(30,60,300,900)[$interval.SelectedIndex]
@@ -506,7 +624,7 @@ function Show-Main {
   $timer.Start()
   $f.Add_FormClosed({ $Script:Sync.Stop = $true; $timer.Stop() })
   $cur = Load-Watched
-  if ($cur) { try { Update-LiveData (As-Str $cur.projectId); $status.Text = [string]$Script:Sync.Status } catch { $status.Text = $_.Exception.Message } }
+  if ($cur) { & $loadTemplates }
   & $renderStars
   [void]$f.ShowDialog()
 }
@@ -550,6 +668,31 @@ function Invoke-SelfTest {
   if ($one -notmatch '"characteristics":\[') { throw 'Einzelnes Merkmal muss ein Array sein' }
   if ($one -notmatch '"measurements":\[') { throw 'Einzelner Messwert muss ein Array sein' }
   Remove-Item -Recurse -Force $dir
+  $filter = Build-PieceFilter 'proj-1' 'tpl-1' '2026-01-01' '2026-01-31'
+  if ($filter -notmatch 'inspectorProject/id eq proj-1') { throw 'Projektfilter fehlt' }
+  if ($filter -notmatch 'inspectorPieceTemplate/id eq tpl-1') { throw 'Templatefilter fehlt' }
+  if ($filter -notmatch 'creationDateUser ge 2026-01-01T00:00:00Z') { throw 'Von-Datum fehlt' }
+  if ($filter -notmatch 'creationDateUser le 2026-01-31T23:59:59Z') { throw 'Bis-Datum fehlt' }
+  if ($filter -match 'controlsCount') { throw 'controlsCount darf nicht im Filter stehen' }
+  $bare = Build-PieceFilter 'proj-1' '' '' ''
+  if ($bare -match 'inspectorPieceTemplate') { throw 'Ohne Vorlage kein Templatefilter' }
+  $settingsDir = Join-Path ([IO.Path]::GetTempPath()) ('dl-merkmal-set-' + [guid]::NewGuid().ToString('N'))
+  New-Item -ItemType Directory -Path $settingsDir | Out-Null
+  $Script:SettingsFile = Join-Path $settingsDir 'settings.json'
+  $Script:HostUrl = 'https://example.test'
+  $Script:Token = ''
+  $Script:TemplateId = 'tpl-1'
+  $Script:TemplateName = 'Vorlage Eins'
+  Save-Settings
+  $saved = Read-Utf8Text $Script:SettingsFile
+  if ($saved -notmatch 'tpl-1') { throw 'templateId nicht gespeichert' }
+  if ($saved -notmatch 'Vorlage Eins') { throw 'templateName nicht gespeichert' }
+  $Script:TemplateId = ''
+  $Script:TemplateName = ''
+  Load-Settings | Out-Null
+  if ($Script:TemplateId -ne 'tpl-1') { throw 'templateId nicht geladen' }
+  if ($Script:TemplateName -ne 'Vorlage Eins') { throw 'templateName nicht geladen' }
+  Remove-Item -Recurse -Force $settingsDir
   Write-Host 'SelfTest OK'
 }
 if ($env:DL_MERKMAL_SELFTEST -eq '1') { Invoke-SelfTest; exit 0 }
