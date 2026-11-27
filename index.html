@@ -26,12 +26,13 @@
           <span class="badge" id="data-badge">Beispieldaten</span>
           <span class="badge" id="stand-badge" hidden></span>
           <span class="badge is-published" id="setup-badge">Veröffentlichte Ansicht</span>
-          <span class="badge" id="app-version">0.8.0</span>
+          <span class="badge" id="app-version">0.9.0</span>
         </h1>
         <div class="tools">
           <label class="filter">
+            Letzte
+            <input id="filter-count" type="number" min="1" max="5000" value="25" aria-label="Anzahl der letzten Teile" />
             Teile
-            <input id="filter-count" type="number" min="1" max="5000" value="25" aria-label="Anzahl der angezeigten Teile" />
           </label>
           <div class="filter-quick" role="group" aria-label="Schnellauswahl">
             <button type="button" data-count="10">10</button>
@@ -54,6 +55,11 @@
           <button type="button" id="reset" title="Lokalen Entwurf löschen und die veröffentlichte Ansicht laden">Zurücksetzen</button>
         </div>
       </header>
+      <div id="timeline" hidden>
+        <span id="timeline-total">0 Teile</span>
+        <div id="timeline-bars"></div>
+        <span id="range-note">Letzte 25 Teile</span>
+      </div>
       <p id="demo-note" class="demo-note" hidden>Beispielansicht ohne Helfer. Eigene Projekte: DL-Merkmal-Viewer starten (localhost:8765).</p>
       <div id="workspace">
         <aside id="wizard" hidden>
@@ -107,9 +113,17 @@
           </section>
         </aside>
         <aside id="editor" hidden>
-          <p class="note">Abschließen speichert Kamera, Geometrien, Fußpunkte, Fähnchen und die Beschriftung nur in diesem Browser (Lokaler Entwurf). Exportieren und <code>data/layout.json</code> ersetzen, damit alle die Ansicht sehen.</p>
-          <h2>Zuordnung</h2>
-          <label>
+          <div id="assign-head">
+            <button type="button" id="editor-close" aria-label="Schliessen">X</button>
+            <h2 id="assign-step">Merkmal</h2>
+            <p id="assign-name" class="note"></p>
+            <div class="assign-modes">
+              <button type="button" id="mode-point">Punkt</button>
+              <button type="button" id="mode-geometry">Geometrie</button>
+            </div>
+            <p id="pick-status" class="note">Ein Klick auf das Modell setzt den Fußpunkt.</p>
+          </div>
+          <label id="geometry-type-wrap">
             Art
             <select id="tool">
               <option value="point">Punkt</option>
@@ -123,7 +137,6 @@
             </select>
           </label>
           <label class="checkline"><input id="snap" type="checkbox" checked /> Knoten fangen</label>
-          <p id="pick-status" class="note">Ein Klick setzt den Fußpunkt.</p>
           <div id="plane-tools" hidden>
             <label>
               Ebene
@@ -151,6 +164,8 @@
             <button type="button" id="view-save-ok">Speichern</button>
             <ul id="view-list" class="pick-list"></ul>
           </div>
+          <button type="button" id="assign-next">Weiter zum nächsten Merkmal</button>
+          <button type="button" id="assign-done">Fertig</button>
           <h2>Fähnchen</h2>
           <label>
             Fußpunkt
@@ -186,6 +201,8 @@
             </div>
             <button type="button" id="geo-delete">Geometrie löschen</button>
           </div>
+          <details id="appearance">
+          <summary>Darstellung</summary>
           <h2>Beschriftung</h2>
           <form id="template-form">
             <label>
@@ -231,6 +248,7 @@
             <input id="refresh-seconds" type="number" min="5" max="3600" step="5" value="60" />
             Sekunden. Der lokale Helfer holt DataLoop in seinem eigenen Intervall.
           </label>
+          </details>
         </aside>
         <div id="stage">
           <canvas id="view" aria-label="3D-Ansicht des Bauteils"></canvas>
