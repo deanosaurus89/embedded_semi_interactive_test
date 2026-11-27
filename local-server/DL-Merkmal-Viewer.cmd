@@ -6,7 +6,7 @@ exit /b
 $ErrorActionPreference = 'Stop'
 if (-not $env:LOCALAPPDATA) { $env:LOCALAPPDATA = [IO.Path]::GetTempPath() }
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
-$Script:Version = '0.6.0'
+$Script:Version = '0.7.0'
 $Script:AppDir = Join-Path $env:LOCALAPPDATA 'DL-Merkmal-Viewer'
 $Script:SettingsFile = Join-Path $Script:AppDir 'settings.json'
 $Script:CacheDir = Join-Path $Script:AppDir 'cache'
@@ -22,7 +22,7 @@ $Script:MockSizes = $null
 $Script:MockCalls = 0
 $Script:LastUrl = ''
 $Script:StaticFiles = @(
-  'index.html','css/app.css','js/app.js','js/wizard.js','js/data-source.js','js/geometry.js','js/label-template.js','js/fit.js','js/mesh-select.js','js/tumble-controls.js','js/tumble.js','js/mw-vec.js','js/pointertap.js','js/viewsnap.js','js/viewcube.js','js/polyline.js','data/layout.json','data/example-measurements.json','models/milkyway.obj'
+  'index.html','css/app.css','js/app.js','js/wizard.js','js/anchors.js','js/views.js','js/data-source.js','js/geometry.js','js/label-template.js','js/fit.js','js/mesh-select.js','js/tumble-controls.js','js/tumble.js','js/mw-vec.js','js/pointertap.js','js/viewsnap.js','js/viewcube.js','js/polyline.js','data/layout.json','data/example-measurements.json','models/milkyway.obj'
 )
 
 function As-One($v) {
@@ -393,6 +393,34 @@ function Send-Json($ctx, [int]$Code, $Obj) {
   $ctx.Response.Headers['Cache-Control'] = 'no-store'
   Send-Text $ctx $Code (ConvertTo-PlainJson $Obj) 'application/json; charset=utf-8'
 }
+function Safe-ViewName([string]$Name) {
+  $clean = ([string]$Name).Trim()
+  if ($clean -notmatch '^[A-Za-z0-9_-]{1,64}$') { throw 'ungueltiger Ansichtsname' }
+  return $clean
+}
+function Get-ViewList {
+  $items = New-List
+  $dir = Join-Path $Script:AppDir 'views'
+  if (Test-Path -LiteralPath $dir) {
+    foreach ($file in @(Get-ChildItem -LiteralPath $dir -Filter '*.json' -File)) {
+      [void]$items.Add(@{ name = [IO.Path]::GetFileNameWithoutExtension($file.Name) })
+    }
+  }
+  return @{ items = $items }
+}
+function Read-View([string]$Name) {
+  $safe = Safe-ViewName $Name
+  $path = Join-Path (Join-Path $Script:AppDir 'views') ($safe + '.json')
+  if (-not (Test-Path -LiteralPath $path)) { return $null }
+  return (Read-Utf8Text $path)
+}
+function Save-View([string]$Raw) {
+  $obj = $Raw | ConvertFrom-Json
+  $safe = Safe-ViewName (As-Str $obj.name)
+  $dir = Join-Path $Script:AppDir 'views'
+  if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null }
+  Write-Utf8Text (Join-Path $dir ($safe + '.json')) $Raw
+}
 function Handle-Api($ctx, [string]$Method, [string]$Path) {
   if ($Path -eq '/api/version' -and $Method -eq 'GET') { Send-Json $ctx 200 @{ name = 'DL-Merkmal-Viewer'; version = $Script:Version }; return }
   if ($Path -eq '/api/settings') {
@@ -444,6 +472,24 @@ function Handle-Api($ctx, [string]$Method, [string]$Path) {
     $ctx.Response.Headers['Cache-Control'] = 'public, max-age=86400'
     $fs = [IO.File]::OpenRead($file)
     try { $fs.CopyTo($ctx.Response.OutputStream) } finally { $fs.Close() }
+    return
+  }
+  if ($Path -eq '/api/views' -and $Method -eq 'GET') { Send-Json $ctx 200 (Get-ViewList); return }
+  if ($Path -eq '/api/views' -and $Method -eq 'POST') {
+    $reader = New-Object IO.StreamReader($ctx.Request.InputStream, [Text.Encoding]::UTF8)
+    $raw = $reader.ReadToEnd(); $reader.Close()
+    Save-View $raw
+    Send-Json $ctx 200 @{ ok = $true }
+    return
+  }
+  if ($Path -match '^/api/views/([A-Za-z0-9_-]+)$' -and $Method -eq 'GET') {
+    $file = Read-View ([Uri]::UnescapeDataString($Matches[1]))
+    if ($null -eq $file) { Send-Json $ctx 404 @{ error = 'nicht gefunden' }; return }
+    $ctx.Response.StatusCode = 200
+    $ctx.Response.ContentType = 'application/json; charset=utf-8'
+    $ctx.Response.Headers['Cache-Control'] = 'no-store'
+    $bytes = [Text.Encoding]::UTF8.GetBytes($file)
+    $ctx.Response.OutputStream.Write($bytes, 0, $bytes.Length)
     return
   }
   if ($Path -eq '/api/controls' -and $Method -eq 'GET') {
@@ -673,7 +719,19 @@ function Invoke-SelfTest {
   try { $ctx.Response.OutputStream.Close() } catch {}
   $body = $task.Result.Content.ReadAsStringAsync().Result
   $listener.Stop(); $listener.Close()
-  if ($body -notmatch '"version":"0.6.0"') { throw "Version falsch: $body" }
+  if ($body -notmatch '"version":"0.7.0"') { throw "Version falsch: $body" }
+  $viewRoot = Join-Path ([IO.Path]::GetTempPath()) ('dl-views-' + [guid]::NewGuid().ToString('N'))
+  $Script:AppDir = $viewRoot
+  $viewJson = '{"schemaVersion":2,"name":"ansicht-1","projectId":"proj-alpha","templateId":"tpl-1","pieceId":null,"models":[{"name":"Gehaeuse.prt","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","enabled":true}],"labelSize":"small","controls":[{"id":"ctl-1","objectName":"Objekt 1","name":"Merkmal A","color":"#2456b5","selected":true}],"placements":{"ctl-1":{"color":"#2456b5","anchor":{"kind":"geometry","geometryId":"geo-1","mode":"contour","point":{"x":1,"y":2,"z":3}}}},"geometries":[],"camera":null}'
+  Save-View $viewJson
+  $listed = Get-ViewList
+  if ($listed.items.Count -ne 1 -or $listed.items[0].name -ne 'ansicht-1') { throw 'Ansicht fehlt in der Liste' }
+  $loaded = Read-View 'ansicht-1'
+  if ($loaded -notmatch 'proj-alpha' -or $loaded -notmatch 'tpl-1' -or $loaded -notmatch 'ctl-1' -or $loaded -notmatch 'contour' -or $loaded -notmatch '#2456b5') { throw 'Ansicht nicht vollstaendig gelesen' }
+  $bad = $false
+  try { Safe-ViewName '..\evil' | Out-Null } catch { $bad = $true }
+  if (-not $bad) { throw 'Pfad in der Ansicht war erlaubt' }
+  Remove-Item -Recurse -Force $viewRoot
   Write-Host 'SelfTest OK'
 }
 if ($env:DL_MERKMAL_SELFTEST -eq '1') { Invoke-SelfTest; exit 0 }

@@ -20,6 +20,8 @@ import { DEFAULT_TEMPLATE, normalizeTemplate, renderFlag } from "./label-templat
 import { fitType, formatFit } from "./fit.js";
 import { buildMesh } from "./mesh-select.js";
 import { startWizard } from "./wizard.js";
+import { centerPoint, constrainToContour, distancePointToTriangle, footOnFeature, nearestFoot } from "./anchors.js";
+import { viewDocument } from "./views.js";
 
 // Anchors and geometries are stored in the original OBJ coordinate system.
 // The mesh is not moved, so a raycast hit can be saved as-is.
@@ -96,6 +98,14 @@ const els = {
   geoWidth: document.getElementById("geo-width"),
   geoOpacity: document.getElementById("geo-opacity"),
   geoAttach: document.getElementById("geo-attach"),
+  footMode: document.getElementById("foot-mode"),
+  colorPalette: document.getElementById("color-palette"),
+  viewSave: document.getElementById("view-save"),
+  viewOpen: document.getElementById("view-open"),
+  viewDialog: document.getElementById("view-dialog"),
+  viewName: document.getElementById("view-name"),
+  viewSaveOk: document.getElementById("view-save-ok"),
+  viewList: document.getElementById("view-list"),
   geoDelete: document.getElementById("geo-delete"),
   snap: document.getElementById("snap"),
   pickStatus: document.getElementById("pick-status"),
@@ -136,6 +146,8 @@ const state = {
   nearFirst: false,
   model: null,
   warnedLive: false,
+  session: null,
+  loadedModels: [],
 };
 
 const PICK_MIN = { Linie: 2, Kreis: 3, Ebene: 4, Kugel: 4, Zylinder: 4, Kegel: 4, Langloch: 4 };
@@ -296,6 +308,16 @@ async function startAuthor(params) {
       if (els.wizard) els.wizard.hidden = false;
     });
   }
+  for (const button of [els.viewSave, els.viewOpen]) if (button) button.hidden = false;
+  const viewName = params.get("view");
+  if (viewName) {
+    try {
+      await loadNamedView(viewName);
+      return;
+    } catch (error) {
+      toast(error.message || "Ansicht nicht geladen");
+    }
+  }
   startWizard({ apply: applyAuthorSelection });
 }
 
@@ -335,7 +357,16 @@ async function applyAuthorSelection(selection) {
     features: [],
     characteristics: selection.controls.map(characteristicFromControl),
   });
+  state.session = {
+    projectId: selection.project?.id || "",
+    projectName: selection.project?.name || "",
+    templateId: selection.template?.id || null,
+    templateName: selection.template?.name || "",
+    pieceId: selection.template ? null : selection.piece?.id || null,
+  };
+  state.loadedModels = selection.models.map((model) => ({ name: model.name, hash: model.hash, enabled: true }));
   acceptData(data, { mode: "live", initial: true, switched: true });
+  assignPalette();
   document.body.classList.toggle("labels-small", Boolean(selection.smallLabels));
   if (selection.smallLabels && state.setup) {
     state.setup.labelTemplate.size = "S";
@@ -516,7 +547,12 @@ function bindUi() {
   els.geoColor.addEventListener("input", () => updateSelectedGeometry({ color: els.geoColor.value }));
   els.geoWidth.addEventListener("input", () => updateSelectedGeometry({ lineWidth: Number(els.geoWidth.value) }));
   els.geoOpacity.addEventListener("input", () => updateSelectedGeometry({ opacity: Number(els.geoOpacity.value) }));
-  els.geoAttach.addEventListener("change", () => updateSelectedGeometry({ attach: els.geoAttach.value }));
+  els.geoAttach.addEventListener("change", () => setFootMode(els.geoAttach.value));
+  if (els.footMode) els.footMode.addEventListener("change", () => setFootMode(els.footMode.value));
+  if (els.colorPalette) buildPalette();
+  if (els.viewSave) els.viewSave.addEventListener("click", () => { if (els.viewDialog) els.viewDialog.hidden = false; });
+  if (els.viewOpen) els.viewOpen.addEventListener("click", () => { if (els.viewDialog) els.viewDialog.hidden = false; refreshViewList().catch((error) => toast(error.message)); });
+  if (els.viewSaveOk) els.viewSaveOk.addEventListener("click", () => saveNamedView().catch((error) => toast(error.message)));
   els.geoDelete.addEventListener("click", deleteSelectedGeometry);
   els.fitOk.addEventListener("click", confirmPreview);
   els.fitMore.addEventListener("click", () => {
@@ -843,22 +879,28 @@ function normalizePlacement(value) {
     };
   }
   placement.anchor = normalizeAnchor(value.anchor);
-  if (!placement.flag && !placement.anchor) return null;
+  if (typeof value.color === "string" && value.color) placement.color = value.color;
+  if (!placement.flag && !placement.anchor && !placement.color) return null;
   return placement;
 }
 
 function normalizeAnchor(anchor) {
   if (!anchor || typeof anchor !== "object") return null;
   if ((anchor.kind === "geometry" || anchor.geometryId) && typeof (anchor.geometryId) === "string") {
+    const mode = ["center", "contour", "nearest", "mesh"].includes(anchor.mode)
+      ? anchor.mode
+      : anchor.attach === "nearest" ? "nearest" : "center";
     return {
       kind: "geometry",
       geometryId: anchor.geometryId,
-      attach: anchor.attach === "nearest" ? "nearest" : "center",
+      mode,
+      attach: mode === "nearest" ? "nearest" : "center",
+      point: asVec3(anchor.point),
     };
   }
   const point = asVec3(anchor.point || anchor);
   if (!point) return null;
-  return { kind: "point", point };
+  return { kind: "point", mode: "mesh", point };
 }
 
 function normalizeGeometry(raw) {
@@ -977,14 +1019,17 @@ function serializePlacement(placement) {
   if (placement.flag) {
     entry.flag = { x: round(placement.flag.x, 4), y: round(placement.flag.y, 4), pinned: Boolean(placement.flag.pinned) };
   }
+  if (placement.color) entry.color = placement.color;
   if (placement.anchor?.kind === "geometry") {
     entry.anchor = {
       kind: "geometry",
       geometryId: placement.anchor.geometryId,
+      mode: placement.anchor.mode || (placement.anchor.attach === "nearest" ? "nearest" : "center"),
       attach: placement.anchor.attach || "center",
+      point: placement.anchor.point ? roundVec(placement.anchor.point) : null,
     };
   } else if (placement.anchor?.point) {
-    entry.anchor = { kind: "point", point: roundVec(placement.anchor.point) };
+    entry.anchor = { kind: "point", mode: "mesh", point: roundVec(placement.anchor.point) };
   }
   return entry;
 }
@@ -1197,7 +1242,7 @@ function ensurePlacementsForData() {
     const point = asVec3(characteristic.defaultAnchor);
     state.setup.placements[characteristic.id] = {
       flag: null,
-      anchor: point ? { kind: "point", point } : null,
+      anchor: point ? { kind: "point", mode: "mesh", point } : null,
     };
   }
 }
@@ -1227,6 +1272,7 @@ function windowOf(measurements) {
 }
 
 function renderFlags() {
+  assignPalette();
   els.flags.replaceChildren();
   for (const key of Object.keys(state.setup.placements)) {
     els.flags.append(makeFlag(key));
@@ -1273,7 +1319,68 @@ function fillFlag(article, key) {
   article.dataset.n = String(built.count);
   article.dataset.oot = String(built.outCount);
   article.innerHTML = built.html;
+  paintLabel(article, key);
   markAnchor(article, key);
+}
+
+function paintLabel(article, key) {
+  const color = colorForKey(key);
+  article.style.setProperty("--flag-color", color);
+  article.classList.add("has-color");
+  article.style.borderLeftColor = color;
+  const warn = footWarning(key);
+  article.classList.toggle("is-foot-warn", warn);
+  let note = article.querySelector(".foot-warn");
+  if (warn) {
+    if (!note) {
+      note = document.createElement("p");
+      note.className = "foot-warn";
+      article.append(note);
+    }
+    note.textContent = "Fußpunkt liegt nicht auf der Geometrie.";
+  } else if (note) note.remove();
+}
+
+function colorForKey(key) {
+  const placement = state.setup?.placements?.[key];
+  if (placement?.color) return placement.color;
+  const geometry = geometryForKey(key);
+  if (geometry?.color) return geometry.color;
+  const index = Math.max(0, Object.keys(state.setup?.placements || {}).indexOf(key));
+  return GEOMETRY_PALETTE[index % GEOMETRY_PALETTE.length];
+}
+
+function footWarning(key) {
+  const anchor = state.setup?.placements?.[key]?.anchor;
+  const point = anchorWorld(key);
+  if (!anchor || !point) return false;
+  if (anchor.kind === "point" || anchor.mode === "mesh") return meshDistance(point) > 4;
+  const geometry = geometryForKey(key);
+  if (!geometry) return true;
+  return !footOnFeature(point, geometry, anchor.mode || "center");
+}
+
+function meshDistance(point) {
+  let best = Infinity;
+  state.model?.traverse((obj) => {
+    const index = obj.userData?.meshIndex;
+    if (!index?.faces || best < 0.05) return;
+    for (const face of index.faces) {
+      const a = vecOf(index.vertices[face.i0]);
+      const b = vecOf(index.vertices[face.i1]);
+      const c = vecOf(index.vertices[face.i2]);
+      if (!a || !b || !c) continue;
+      const distance = distancePointToTriangle(point, a, b, c);
+      if (distance < best) best = distance;
+      if (best < 0.05) break;
+    }
+  });
+  return best;
+}
+
+function vecOf(value) {
+  if (!value) return null;
+  return { x: value[0], y: value[1], z: value[2] };
 }
 
 function markAnchor(article, key) {
@@ -1343,32 +1450,29 @@ function applyAllPositions() {
 function anchorWorld(key) {
   const anchor = state.setup.placements[key]?.anchor;
   if (!anchor) return null;
-  if (anchor.kind === "geometry") {
-    const geometry = state.setup.geometries.find((item) => item.id === anchor.geometryId);
-    if (!geometry) return null;
-    const attach = anchor.attach || geometry.attach || "center";
-    if (geometry.center && geometry.normal && geometry.radius && attach === "nearest") {
-      return nearestOnCircle(geometry, key) || geometry.center;
-    }
-    if (geometry.type === "plane" && geometry.outline?.length) {
-      const loop = geometry.outline.length > 1
-        && geometry.outline[0].x === geometry.outline.at(-1).x
-        && geometry.outline[0].y === geometry.outline.at(-1).y
-        && geometry.outline[0].z === geometry.outline.at(-1).z
-        ? geometry.outline.slice(0, -1)
-        : geometry.outline;
-      const sum = loop.reduce((acc, point) => add(acc, point), { x: 0, y: 0, z: 0 });
-      return scale(sum, 1 / loop.length);
-    }
-    if (geometry.center) return geometry.center;
-    if (geometry.start) return geometry.start;
-    if (geometry.corners?.length) {
-      const sum = geometry.corners.reduce((acc, point) => add(acc, point), { x: 0, y: 0, z: 0 });
-      return scale(sum, 1 / geometry.corners.length);
-    }
-    return null;
+  if (anchor.kind === "point" || anchor.mode === "mesh") return anchor.point || null;
+  const geometry = geometryForAnchor(anchor);
+  if (!geometry) return anchor.point || null;
+  const mode = anchor.mode || "center";
+  if (mode === "center") return centerPoint(geometry);
+  if (mode === "contour") return constrainToContour(geometry, anchor.point) || centerPoint(geometry);
+  if (mode === "nearest") {
+    const element = els.flags.querySelector(`[data-id="${CSS.escape(key)}"]`);
+    const stage = els.stage.getBoundingClientRect();
+    const rect = element?.getBoundingClientRect();
+    const label = rect ? { x: rect.left - stage.left + rect.width / 2, y: rect.top - stage.top + rect.height / 2 } : { x: stage.width / 2, y: stage.height / 2 };
+    return nearestFoot(geometry, (point) => projectToStage(point), label) || centerPoint(geometry);
   }
-  return anchor.point || null;
+  return anchor.point || centerPoint(geometry);
+}
+
+function geometryForAnchor(anchor) {
+  if (!anchor?.geometryId) return null;
+  return state.setup.geometries.find((item) => item.id === anchor.geometryId) || null;
+}
+
+function geometryForKey(key) {
+  return geometryForAnchor(state.setup.placements[key]?.anchor);
 }
 
 function nearestOnCircle(geometry, key) {
@@ -1412,6 +1516,7 @@ function updateLeaders() {
     if (flagRect.width < 2) continue;
     const end = borderPoint(flagRect, projected);
     const group = document.createElementNS(SVG_NS, "g");
+    group.dataset.key = key;
     const selected = state.edit && state.selectedId === key;
     if (selected) group.classList.add("is-selected");
     const line = document.createElementNS(SVG_NS, "line");
@@ -1420,11 +1525,14 @@ function updateLeaders() {
     line.setAttribute("x2", end.x.toFixed(2));
     line.setAttribute("y2", end.y.toFixed(2));
     const anchor = state.setup.placements[key].anchor;
-    const geometry = anchor?.kind === "geometry" ? state.setup.geometries.find((item) => item.id === anchor.geometryId) : null;
-    if (geometry) line.setAttribute("stroke", geometry.color);
+    const color = colorForKey(key);
+    line.setAttribute("stroke", color);
     group.append(line);
-    if (anchor?.kind !== "geometry") {
-      group.append(makeHandle(projected.x, projected.y, { kind: "anchor", id: key, index: "0" }, geometry?.color || "#1b2330"));
+    if (state.edit && anchor) {
+      const draggable = anchor.kind === "point" || anchor.mode === "contour" || anchor.mode === "mesh";
+      const handle = makeHandle(projected.x, projected.y, { kind: "anchor", id: key, index: "0" }, color);
+      if (!draggable) handle.classList.add("is-fixed");
+      group.append(handle);
     }
     els.leaders.append(group);
   }
@@ -1514,11 +1622,23 @@ function onHandlePointerDown(event) {
   markSelection();
   syncEditor();
   const move = (ev) => {
-    const hit = pickSurface(ev);
-    if (!hit) return;
+    const contourDrag = handleDrag.kind === "anchor" && state.setup.placements[handleDrag.id]?.anchor?.mode === "contour";
+    const hit = contourDrag ? null : pickSurface(ev);
+    if (!contourDrag && !hit) return;
     if (handleDrag.kind === "anchor") {
       const placement = state.setup.placements[handleDrag.id];
-      if (placement) placement.anchor = { kind: "point", point: hit.point };
+      if (!placement?.anchor) return;
+      const geometry = geometryForAnchor(placement.anchor);
+      if (placement.anchor.mode === "contour" && geometry) {
+        const stage = els.stage.getBoundingClientRect();
+        const cursor = { x: ev.clientX - stage.left, y: ev.clientY - stage.top };
+        placement.anchor.point = nearestFoot(geometry, (point) => projectToStage(point), cursor) || constrainToContour(geometry, placement.anchor.point);
+        placement.anchor.point = constrainToContour(geometry, placement.anchor.point);
+      } else if (hit) {
+        placement.anchor = geometry
+          ? { kind: "geometry", geometryId: geometry.id, mode: "mesh", attach: "center", point: hit.point }
+          : { kind: "point", mode: "mesh", point: hit.point };
+      } else return;
     } else {
       const geometry = state.setup.geometries.find((item) => item.id === handleDrag.id);
       if (!geometry || !geometry.points[handleDrag.index]) return;
@@ -1768,10 +1888,10 @@ function onSurfaceClick(hit) {
     const placement = state.setup.placements[state.selectedId] || (state.setup.placements[state.selectedId] = {});
     const geometryId = hit.geometryId;
     if (geometryId) {
-      placement.anchor = { kind: "geometry", geometryId, attach: "center" };
+      placement.anchor = { kind: "geometry", geometryId, mode: "center", attach: "center" };
     } else {
       const picked = capturePick(hit);
-      placement.anchor = { kind: "point", point: { x: picked.point[0], y: picked.point[1], z: picked.point[2] } };
+      placement.anchor = { kind: "point", mode: "mesh", point: { x: picked.point[0], y: picked.point[1], z: picked.point[2] } };
     }
     state.reconnect = false;
     refreshFlagContents();
@@ -1786,7 +1906,7 @@ function onSurfaceClick(hit) {
     }
     const picked = capturePick(hit);
     const placement = state.setup.placements[state.selectedId] || (state.setup.placements[state.selectedId] = {});
-    placement.anchor = { kind: "point", point: { x: picked.point[0], y: picked.point[1], z: picked.point[2] } };
+    placement.anchor = { kind: "point", mode: "mesh", point: { x: picked.point[0], y: picked.point[1], z: picked.point[2] } };
     toast(UI.anchorSet);
     updateLeaders();
     return;
@@ -1866,7 +1986,7 @@ function confirmPreview() {
   if (previous && !window.confirm("Die vorhandene Geometrie dieses Pruefmerkmals ersetzen?")) return;
   if (previous) state.setup.geometries = state.setup.geometries.filter((item) => item.id !== previous.id);
   state.setup.geometries.push(state.preview);
-  placement.anchor = { kind: "geometry", geometryId: state.preview.id, attach: "center" };
+  placement.anchor = { kind: "geometry", geometryId: state.preview.id, mode: "center", attach: "center" };
   state.selectedGeometryId = state.preview.id;
   resetPicks();
   syncEditor();
@@ -1927,6 +2047,65 @@ function probeApi() {
     },
     locked() {
       return state.viewLocked;
+    },
+    demoCircle(key) {
+      const color = "#2456b5";
+      state.setup.geometries = state.setup.geometries.filter((item) => item.id !== "geo-demo");
+      state.setup.geometries.push({
+        id: "geo-demo",
+        type: "circle",
+        mode: "fit",
+        color,
+        lineWidth: 2.5,
+        opacity: 0.9,
+        attach: "center",
+        center: { x: 280, y: 70, z: 78 },
+        normal: { x: 0, y: 0, z: 1 },
+        radius: 36,
+      });
+      const placement = state.setup.placements[key];
+      placement.color = color;
+      placement.anchor = { kind: "geometry", geometryId: "geo-demo", mode: "center", attach: "center", point: null };
+      state.selectedId = key;
+      state.edit = true;
+      document.body.classList.add("is-editing");
+      els.editor.hidden = false;
+      rebuildGeometries();
+      renderFlags();
+      updateLeaders();
+      syncEditor();
+      return this.foot(key);
+    },
+    setMode(key, mode) {
+      state.selectedId = key;
+      state.edit = true;
+      setFootMode(mode);
+      return this.foot(key);
+    },
+    foot(key) {
+      const point = anchorWorld(key);
+      return point ? [point.x, point.y, point.z] : null;
+    },
+    style(key) {
+      const article = document.querySelector(`.flag[data-id="${CSS.escape(key)}"]`);
+      const line = els.leaders.querySelector(`g[data-key="${CSS.escape(key)}"] line`);
+      return {
+        color: article?.style.getPropertyValue("--flag-color") || "",
+        stroke: line?.getAttribute("stroke") || "",
+        warn: article?.querySelector(".foot-warn")?.textContent || "",
+        frame: Boolean(article?.classList.contains("has-color")),
+      };
+    },
+    loose(key) {
+      state.setup.placements[key].anchor = { kind: "point", mode: "mesh", point: { x: 0, y: 0, z: 400 } };
+      refreshFlagContents();
+      updateLeaders();
+      return this.style(key);
+    },
+    setColor(key, color) {
+      state.selectedId = key;
+      setLabelColor(color);
+      return this.style(key);
     },
     camera() {
       return [camera.position.x, camera.position.y, camera.position.z];
@@ -2441,6 +2620,209 @@ function meshFrom(positions, indices, color, opacity, polygonOffset) {
   return mesh;
 }
 
+function buildPalette() {
+  els.colorPalette.replaceChildren();
+  for (const color of GEOMETRY_PALETTE) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.style.background = color;
+    button.title = color;
+    button.addEventListener("click", () => setLabelColor(color));
+    els.colorPalette.append(button);
+  }
+}
+
+function setLabelColor(color) {
+  const key = state.selectedId;
+  const placement = state.setup?.placements?.[key];
+  if (!placement) return;
+  placement.color = color;
+  const geometry = geometryForKey(key);
+  if (geometry) {
+    geometry.color = color;
+    if (els.geoColor) els.geoColor.value = color;
+    rebuildGeometries();
+  }
+  highlightPalette(color);
+  refreshFlagContents();
+  updateLeaders();
+}
+
+function highlightPalette(color) {
+  if (!els.colorPalette) return;
+  for (const button of els.colorPalette.querySelectorAll("button")) {
+    button.classList.toggle("is-selected", button.title.toLowerCase() === String(color || "").toLowerCase());
+  }
+}
+
+function assignPalette() {
+  if (!state.setup?.placements) return;
+  Object.keys(state.setup.placements).forEach((key, index) => {
+    const placement = state.setup.placements[key];
+    if (!placement.color) placement.color = GEOMETRY_PALETTE[index % GEOMETRY_PALETTE.length];
+  });
+}
+
+function setFootMode(mode) {
+  const key = state.selectedId;
+  const placement = state.setup?.placements?.[key];
+  if (!placement) return;
+  const geometry = geometryForKey(key);
+  if (!geometry) mode = "mesh";
+  if (!geometry) {
+    if (placement.anchor?.point) placement.anchor = { kind: "point", mode: "mesh", point: placement.anchor.point };
+  } else {
+    const point = mode === "contour" ? constrainToContour(geometry, placement.anchor?.point || centerPoint(geometry)) : placement.anchor?.point || null;
+    placement.anchor = { kind: "geometry", geometryId: geometry.id, mode, attach: mode === "nearest" ? "nearest" : "center", point };
+  }
+  if (els.footMode) els.footMode.value = geometry ? mode : "mesh";
+  if (els.geoAttach && geometry) els.geoAttach.value = mode;
+  refreshFlagContents();
+  updateLeaders();
+}
+
+function saveNamedView() {
+  const name = els.viewName?.value?.trim();
+  const doc = viewDocument({
+    name,
+    projectId: state.session?.projectId || state.data?.part?.id || "",
+    projectName: state.session?.projectName || state.data?.part?.name || "",
+    templateId: state.session?.templateId || null,
+    templateName: state.session?.templateName || state.data?.part?.template?.name || "",
+    pieceId: state.session?.pieceId || null,
+    models: state.loadedModels,
+    labelSize: document.body.classList.contains("labels-small") ? "small" : "normal",
+    controls: (state.data?.characteristics || []).map((item) => ({
+      id: item.id,
+      objectName: item.objectName,
+      name: item.controlName || item.name,
+      nominal: item.nominal,
+      usl: item.usl,
+      lsl: item.lsl,
+      unit: item.unit,
+      color: colorForKey(item.id),
+      selected: true,
+    })),
+    placements: currentSetup().placements,
+    geometries: currentSetup().geometries,
+    camera: captureCamera(),
+    pollSeconds: state.setup?.refreshSeconds || 60,
+  });
+  return fetch("/api/views", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(doc),
+  }).then(async (response) => {
+    if (!response.ok) throw new Error("Ansicht nicht gespeichert");
+    toast(`Ansicht ${doc.name} gespeichert`);
+    state.session = { ...(state.session || {}), name: doc.name };
+    return refreshViewList();
+  });
+}
+
+async function refreshViewList() {
+  if (!els.viewList) return;
+  const response = await fetch("/api/views", { cache: "no-store" });
+  if (!response.ok) throw new Error("Ansichten nicht geladen");
+  const body = await response.json();
+  els.viewList.replaceChildren();
+  for (const item of body.items || []) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = item.name;
+    button.addEventListener("click", () => loadNamedView(item.name).catch((error) => toast(error.message)));
+    const li = document.createElement("li");
+    li.append(button);
+    els.viewList.append(li);
+  }
+}
+
+async function loadNamedView(name) {
+  const response = await fetch(`/api/views/${encodeURIComponent(name)}`, { cache: "no-store" });
+  if (!response.ok) throw new Error("Ansicht nicht gefunden");
+  const view = await response.json();
+  state.session = {
+    name: view.name,
+    projectId: view.projectId || "",
+    projectName: view.projectName || "",
+    templateId: view.templateId || null,
+    templateName: view.templateName || "",
+    pieceId: view.pieceId || null,
+  };
+  state.loadedModels = view.models || [];
+  await loadHashedModels(state.loadedModels);
+  const template = view.templateId ? { id: view.templateId, name: view.templateName || "" } : { id: `piece:${view.pieceId || "teil"}`, name: view.pieceId || "" };
+  const data = normalizeMeasurements({
+    schemaVersion: 1,
+    source: "live",
+    refreshSeconds: view.pollSeconds || 60,
+    part: { id: view.projectId || "ansicht", name: view.projectName || view.name, template },
+    pieces: [],
+    features: [],
+    characteristics: (view.controls || []).map((control) => ({
+      id: String(control.id),
+      name: control.objectName ? `${control.objectName} / ${control.name}` : control.name || control.id,
+      objectName: control.objectName || "",
+      controlName: control.name || "",
+      unit: control.unit || "mm",
+      nominal: Number(control.nominal) || 0,
+      usl: Number(control.usl) || 0,
+      lsl: Number(control.lsl) || 0,
+      measurements: [],
+    })),
+  });
+  acceptData(data, { mode: "live", initial: true, switched: true });
+  state.setup.geometries = (view.geometries || []).map(normalizeGeometry).filter(Boolean);
+  for (const [key, placement] of Object.entries(view.placements || {})) {
+    const normalized = normalizePlacement(placement);
+    if (normalized) state.setup.placements[key] = { ...(state.setup.placements[key] || {}), ...normalized };
+  }
+  for (const control of view.controls || []) {
+    if (control.color && state.setup.placements[control.id]) state.setup.placements[control.id].color = control.color;
+  }
+  document.body.classList.toggle("labels-small", view.labelSize === "small");
+  if (view.labelSize === "small" && state.setup) state.setup.labelTemplate.size = "S";
+  if (view.camera) {
+    state.setup.camera = normalizeCamera(view.camera);
+    applyCamera(state.setup.camera);
+    cameraIsSaved = true;
+  } else if (state.model) frameModel(state.model, null);
+  state.viewLocked = true;
+  state.edit = false;
+  document.body.classList.remove("is-editing");
+  if (els.wizard) els.wizard.hidden = true;
+  if (els.editor) els.editor.hidden = true;
+  syncViewLock();
+  rebuildGeometries();
+  renderFlags();
+  applyAllPositions();
+  updateLeaders();
+  syncChrome();
+  reveal();
+}
+
+async function loadHashedModels(models) {
+  if (!state.model) {
+    state.model = new THREE.Group();
+    scene.add(state.model);
+  }
+  clearModelGroup();
+  const seen = new Set();
+  for (const model of models || []) {
+    if (!model.hash || model.enabled === false || seen.has(model.hash)) continue;
+    seen.add(model.hash);
+    const response = await fetch(`/api/models/${encodeURIComponent(model.hash)}`, { cache: "force-cache" });
+    if (!response.ok) throw new Error(`${model.name || model.hash} fehlt`);
+    const parsed = new OBJLoader().parse(await response.text());
+    parsed.traverse((obj) => {
+      if (!obj.isMesh) return;
+      obj.material = new THREE.MeshStandardMaterial({ color: 0xb7bcc2, metalness: 0.06, roughness: 0.58 });
+    });
+    state.model.add(parsed);
+  }
+  indexLoadedModel(state.model);
+}
+
 function updateSelectedGeometry(patch) {
   const geometry = state.setup.geometries.find((item) => item.id === state.selectedGeometryId);
   if (!geometry) return;
@@ -2543,7 +2925,13 @@ function syncEditor() {
     els.geoColor.value = geometry.color;
     els.geoWidth.value = String(geometry.lineWidth);
     els.geoOpacity.value = String(geometry.opacity);
-    els.geoAttach.value = geometry.attach || "center";
+    const mode = state.setup.placements[state.selectedId]?.anchor?.mode || geometry.attach || "center";
+    els.geoAttach.value = mode;
+    if (els.footMode) els.footMode.value = mode;
+    highlightPalette(colorForKey(state.selectedId));
+  } else if (els.footMode && state.selectedId) {
+    els.footMode.value = state.setup.placements[state.selectedId]?.anchor?.mode || "mesh";
+    highlightPalette(colorForKey(state.selectedId));
   }
   writeTemplateForm();
 }
