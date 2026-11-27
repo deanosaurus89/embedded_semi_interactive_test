@@ -4,9 +4,10 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light" />
-    <title>Merkmale</title>
-    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%231b2330'/%3E%3Cpath d='M2 12 L8 3 L14 12' fill='none' stroke='%23f0b429' stroke-width='1.6'/%3E%3C/svg%3E" />
+    <title>Merkmal-Viewer</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%231b2330'/%3E%3Cpath d='M2 12 L8 3 L14 12' fill='none' stroke='%232563eb' stroke-width='1.6'/%3E%3C/svg%3E" />
     <link rel="stylesheet" href="css/app.css" />
+    <link rel="stylesheet" href="css/v1.css" />
     <script type="importmap">
       {
         "imports": {
@@ -19,49 +20,58 @@
   <body>
     <div id="app">
       <header class="toolbar">
-        <h1>
-          Merkmale <span id="part-name">Milkyway</span>
+        <div class="brand">Merkmal-Viewer <small id="app-version">1.0.0</small></div>
+        <nav id="steps" class="steps" aria-label="Schritte"></nav>
+        <div class="head-meta">
+          <span id="part-name" class="part-name"></span>
           <span class="badge" id="view-badge" hidden></span>
           <span class="badge" id="template-badge" hidden></span>
           <span class="badge" id="data-badge">Beispieldaten</span>
           <span class="badge" id="stand-badge" hidden></span>
           <span class="badge is-published" id="setup-badge">Veröffentlichte Ansicht</span>
-          <span class="badge" id="app-version">0.9.0</span>
-        </h1>
-        <div class="tools">
-          <label class="filter">
-            Letzte
-            <input id="filter-count" type="number" min="1" max="5000" value="25" aria-label="Anzahl der letzten Teile" />
-            Teile
-          </label>
-          <div class="filter-quick" role="group" aria-label="Schnellauswahl">
-            <button type="button" data-count="10">10</button>
-            <button type="button" data-count="25">25</button>
-            <button type="button" data-count="50">50</button>
-            <button type="button" data-count="all">Alle</button>
+        </div>
+        <div class="spacer"></div>
+        <details id="more-menu">
+          <summary>Mehr</summary>
+          <div class="more-panel">
+            <button type="button" id="view-save" hidden>Ansicht speichern</button>
+            <button type="button" id="view-open" hidden>Ansicht öffnen</button>
+            <button type="button" id="change-selection" hidden>Auswahl ändern</button>
+            <button type="button" id="export" title="Einrichtung als JSON exportieren">Export</button>
+            <button type="button" id="import" title="Einrichtung importieren, nur dieser Rechner">Import</button>
+            <input id="import-file" type="file" accept="application/json,.json" hidden />
+            <button type="button" id="reset" title="Lokalen Entwurf löschen und die veröffentlichte Ansicht laden">Zurücksetzen</button>
+            <button type="button" id="discard" hidden>Verwerfen</button>
           </div>
-          <label class="filter">Von <input id="filter-from" type="date" aria-label="Von Datum" /></label>
-          <label class="filter">Bis <input id="filter-to" type="date" aria-label="Bis Datum" /></label>
-          <button type="button" id="view-lock" class="is-locked" aria-pressed="true">Ansicht entsperren</button>
-          <button type="button" id="view-save" hidden>Ansicht speichern</button>
-          <button type="button" id="view-open" hidden>Ansicht öffnen</button>
-          <button type="button" id="change-selection" hidden>Auswahl ändern</button>
-          <button type="button" id="prepare">Vorbereiten</button>
-          <button type="button" id="finish" hidden>Abschließen</button>
-          <button type="button" id="discard" hidden>Verwerfen</button>
-          <button type="button" id="export" title="Einrichtung als JSON exportieren">Export</button>
-          <button type="button" id="import" title="Einrichtung importieren, nur dieser Rechner">Import</button>
-          <input id="import-file" type="file" accept="application/json,.json" hidden />
-          <button type="button" id="reset" title="Lokalen Entwurf löschen und die veröffentlichte Ansicht laden">Zurücksetzen</button>
+        </details>
+        <div class="modes" role="group" aria-label="Modus">
+          <button type="button" id="prepare" aria-pressed="false">Vorbereiten</button>
+          <button type="button" id="mode-view" aria-pressed="true">Ansicht</button>
         </div>
       </header>
-      <div id="timeline" hidden>
-        <span id="timeline-total">0 Teile</span>
-        <div id="timeline-bars"></div>
-        <span id="range-note">Letzte 25 Teile</span>
-      </div>
       <p id="demo-note" class="demo-note" hidden>Beispielansicht ohne Helfer. Eigene Projekte: DL-Merkmal-Viewer starten (localhost:8765).</p>
       <div id="workspace">
+        <div id="stage">
+          <canvas id="view" aria-label="3D-Ansicht des Bauteils"></canvas>
+          <svg id="leaders" aria-hidden="true"></svg>
+          <div id="flags"></div>
+          <p id="nav-hint" class="navhint">Drehen: linke Maustaste · Verschieben: mittlere oder rechte Maustaste · Zoom: Mausrad · Klick setzt einen Punkt</p>
+          <div id="stats" class="statsbox" hidden>
+            Gemessene Teile gesamt<br />
+            <b id="stats-total">0</b> <span id="stats-span"></span>
+          </div>
+          <button type="button" id="view-lock" class="lock is-locked" aria-pressed="true">Ansicht fixiert</button>
+          <div id="load-progress" hidden>
+            <div id="load-progress-bar"><i></i></div>
+            <span id="load-progress-label">Modell wird geladen …</span>
+          </div>
+          <p id="hint" class="hint" hidden></p>
+          <p id="toast" class="toast" role="status" hidden></p>
+          <div id="loading" role="status" aria-live="polite">
+            <div class="spinner" aria-hidden="true"></div>
+            <p id="loading-text">Modell wird geladen …</p>
+          </div>
+        </div>
         <aside id="wizard" hidden>
           <div class="wizard-head">
             <h2>Projekt öffnen</h2>
@@ -75,116 +85,156 @@
             <p class="note">Das Token bleibt auf diesem Rechner (DPAPI) und wird nicht an die Seite zurückgegeben.</p>
             <button type="button" id="settings-save">Speichern</button>
           </section>
-          <nav class="wizard-steps" aria-label="Schritte">
-            <button type="button" data-wizard-step="search" class="is-current">1 Projekt</button>
-            <button type="button" data-wizard-step="choice">2 Vorlage / Teil</button>
-            <button type="button" data-wizard-step="models">3 Referenzobjekte</button>
-            <button type="button" data-wizard-step="controls">4 Merkmale</button>
-          </nav>
-          <section data-panel="search">
-            <label>Projektname <input id="project-q" type="search" placeholder="Name enthält …" /></label>
-            <label>Workspace <input id="project-ws" type="search" placeholder="optional" /></label>
-            <div class="wizard-row">
-              <button type="button" id="project-search">Suchen</button>
-              <button type="button" id="project-more" hidden>Weitere</button>
-            </div>
-            <ul id="project-results" class="pick-list"></ul>
-          </section>
-          <section data-panel="choice" hidden>
-            <p id="choice-title" class="note"></p>
-            <ul id="template-results" class="pick-list"></ul>
-            <button type="button" id="show-pieces" hidden>Teil ohne Vorlage</button>
-            <div id="piece-search" hidden>
-              <label>Teilname <input id="piece-q" type="search" /></label>
-              <button type="button" id="piece-go">Teile suchen</button>
-            </div>
-            <ul id="piece-results" class="pick-list"></ul>
-          </section>
-          <section data-panel="models" hidden>
-            <p class="note">Jedes Referenzobjekt bleibt in seinen eigenen Koordinaten. Gleiche Datei (gleicher Hash) wird nur einmal geladen.</p>
-            <ul id="model-results" class="pick-list"></ul>
-            <button type="button" id="models-next">Weiter</button>
-          </section>
-          <section data-panel="controls" hidden>
-            <label class="checkline"><input id="small-labels" type="checkbox" /> Kleine Beschriftungen</label>
-            <p id="control-cap" class="note">0 von 10</p>
-            <ul id="control-results" class="pick-list"></ul>
-            <button type="button" id="controls-apply">Übernehmen</button>
-          </section>
-        </aside>
-        <aside id="editor" hidden>
-          <div id="assign-head">
-            <button type="button" id="editor-close" aria-label="Schliessen">X</button>
-            <h2 id="assign-step">Merkmal</h2>
-            <p id="assign-name" class="note"></p>
-            <div class="assign-modes">
-              <button type="button" id="mode-point">Punkt</button>
-              <button type="button" id="mode-geometry">Geometrie</button>
-            </div>
-            <p id="pick-status" class="note">Ein Klick auf das Modell setzt den Fußpunkt.</p>
+          <div class="sheet-body">
+            <section data-panel="search">
+              <p class="sheet-lead">Tippe einen Teil des Namens.</p>
+              <label>Projektname <input id="project-q" type="search" placeholder="Projektname …" /></label>
+              <label>Workspace <input id="project-ws" type="search" placeholder="optional" /></label>
+              <div class="wizard-row">
+                <button type="button" id="project-search" class="primary">Suchen</button>
+                <button type="button" id="project-more" hidden>Weitere</button>
+              </div>
+              <ul id="project-results" class="pick-list"></ul>
+            </section>
+            <section data-panel="choice" hidden>
+              <p id="choice-title" class="sheet-lead"></p>
+              <ul id="template-results" class="pick-list"></ul>
+              <button type="button" id="show-pieces" hidden>Teil ohne Vorlage</button>
+              <div id="piece-search" hidden>
+                <label>Teilname <input id="piece-q" type="search" /></label>
+                <button type="button" id="piece-go">Teile suchen</button>
+              </div>
+              <ul id="piece-results" class="pick-list"></ul>
+              <p class="note">Ohne Vorlage? Dann wird hier direkt ein Teil gewählt.</p>
+            </section>
+            <section data-panel="models" hidden>
+              <p class="sheet-lead">Antippen – das Modell erscheint sofort links.</p>
+              <p class="note">Jedes Referenzobjekt bleibt in seinen eigenen Koordinaten. Gleiche Datei (gleicher Hash) wird nur einmal geladen. Baugruppe: mehrere Objekte möglich.</p>
+              <ul id="model-results" class="pick-list"></ul>
+            </section>
+            <section data-panel="controls" hidden>
+              <p class="sheet-lead">Welche sollen im 3D erscheinen? <span id="control-cap" class="limit">0 / 10</span></p>
+              <input id="control-q" class="search" type="search" placeholder="Filtern: Objekt oder Merkmal …" />
+              <div class="ctrhead"><span></span><span>Objekt</span><span>Merkmal</span><span>Typ</span></div>
+              <ul id="control-results" class="pick-list"></ul>
+            </section>
           </div>
-          <label id="geometry-type-wrap">
-            Art
-            <select id="tool">
-              <option value="point">Punkt</option>
-              <option value="Linie">Linie</option>
-              <option value="Ebene">Ebene</option>
-              <option value="Kreis">Kreis</option>
-              <option value="Langloch">Langloch</option>
-              <option value="Zylinder">Zylinder</option>
-              <option value="Kegel">Kegel</option>
-              <option value="Kugel">Kugel</option>
-            </select>
-          </label>
-          <label class="checkline"><input id="snap" type="checkbox" checked /> Knoten fangen</label>
-          <div id="plane-tools" hidden>
-            <label>
-              Ebene
-              <select id="plane-kind">
-                <option value="quad">4 Punkte</option>
-                <option value="polyline">Linienzug</option>
+          <div class="sheet-foot">
+            <button type="button" id="wizard-back" class="ghost">← Zurück</button>
+            <label class="checkline" id="small-wrap"><input id="small-labels" type="checkbox" /> Kleine Labels (bis 20)</label>
+            <div class="spacer"></div>
+            <button type="button" id="models-next" class="primary big" hidden>Weiter: Merkmale →</button>
+            <button type="button" id="controls-apply" class="primary big" hidden>Platzieren →</button>
+          </div>
+        </aside>
+      </div>
+      <aside id="editor" hidden>
+        <div class="rail">
+          <span id="assign-step" class="prog">Merkmal</span>
+          <div class="bar" aria-hidden="true"><i id="assign-bar"></i></div>
+          <div id="merkmal-chips" class="chips"></div>
+          <button type="button" id="reconnect" hidden>Linie neu verbinden</button>
+        </div>
+        <div class="work">
+          <div class="blk act" id="blk-type">
+            <div class="ident">
+              <span class="sw" id="assign-swatch"></span>
+              <div>
+                <div class="t" id="assign-name"></div>
+                <div class="s">Farbe = Geometrie im 3D</div>
+              </div>
+            </div>
+            <h4><span class="n">1</span>Was antasten?</h4>
+            <div class="seg" id="type-seg">
+              <button type="button" data-tool="point"><span class="ic">•</span>Punkt</button>
+              <button type="button" data-tool="Linie"><span class="ic">╱</span>Linie</button>
+              <button type="button" data-tool="Kreis"><span class="ic">◯</span>Kreis</button>
+              <button type="button" data-tool="Ebene"><span class="ic">▱</span>Ebene</button>
+              <button type="button" data-tool="Zylinder"><span class="ic">⌭</span>Zylinder</button>
+              <button type="button" data-tool="Kegel"><span class="ic">△</span>Kegel</button>
+              <button type="button" data-tool="Kugel"><span class="ic">●</span>Kugel</button>
+              <button type="button" data-tool="Langloch"><span class="ic">⬭</span>Langloch</button>
+            </div>
+            <label id="geometry-type-wrap" class="sr-only">
+              Art
+              <select id="tool">
+                <option value="point">Punkt</option>
+                <option value="Linie">Linie</option>
+                <option value="Ebene">Ebene</option>
+                <option value="Kreis">Kreis</option>
+                <option value="Langloch">Langloch</option>
+                <option value="Zylinder">Zylinder</option>
+                <option value="Kegel">Kegel</option>
+                <option value="Kugel">Kugel</option>
               </select>
             </label>
-            <p id="plane-hint" class="note" hidden>Klick auf den ersten Punkt schliesst den Linienzug</p>
-            <button type="button" id="plane-close" hidden>Schliessen</button>
-          </div>
-          <p class="note">Linke Maustaste dreht die Ansicht, ein kurzer Klick setzt einen Punkt. Mittlere und rechte Maustaste verschieben. Das Mausrad zoomt.</p>
-          <button type="button" id="reconnect" hidden>Linie neu verbinden</button>
-          <div id="fit-preview" hidden>
-            <p id="fit-summary" class="note"></p>
-            <div class="geo-grid">
-              <button type="button" id="fit-ok">Uebernehmen</button>
-              <button type="button" id="fit-more">Weiterer Punkt</button>
-              <button type="button" id="fit-undo">Letzten Punkt entfernen</button>
-              <button type="button" id="fit-cancel">Abbrechen</button>
+            <div id="plane-tools" hidden>
+              <label>
+                Ebene
+                <select id="plane-kind">
+                  <option value="quad">4 Punkte</option>
+                  <option value="polyline">Linienzug</option>
+                </select>
+              </label>
+              <p id="plane-hint" class="note" hidden>Klick auf den ersten Punkt schliesst den Linienzug</p>
+              <button type="button" id="plane-close" hidden>Schliessen</button>
             </div>
           </div>
-          <div id="view-dialog" class="view-dialog" hidden>
-            <label>Name <input id="view-name" type="text" maxlength="64" placeholder="rev-b" /></label>
-            <button type="button" id="view-save-ok">Speichern</button>
-            <ul id="view-list" class="pick-list"></ul>
+          <div class="blk" id="blk-points">
+            <h4><span class="n">2</span>Punkte im 3D klicken</h4>
+            <div id="point-slots" class="slots"></div>
+            <p id="pick-status" class="note">Ein Klick auf das Modell setzt den Fußpunkt.</p>
+            <p id="fit-summary" class="note"></p>
+            <div id="fit-preview">
+              <div class="row-buttons">
+                <button type="button" id="fit-undo">↶ Rückgängig</button>
+                <button type="button" id="fit-cancel">Neu</button>
+                <button type="button" id="fit-ok" hidden>Übernehmen</button>
+                <button type="button" id="fit-more" hidden>Weiterer Punkt</button>
+              </div>
+            </div>
           </div>
-          <button type="button" id="assign-next">Weiter zum nächsten Merkmal</button>
-          <button type="button" id="assign-done">Fertig</button>
-          <h2>Fähnchen</h2>
-          <label>
-            Fußpunkt
-            <select id="foot-mode" title="Nächster Punkt: der Punkt der Geometrie, der auf dem Bildschirm am nächsten am Fähnchen liegt. Er wird bei jeder Kamerabewegung neu berechnet, damit die Linie in der gedrehten Ansicht sinnvoll bleibt.">
-              <option value="center">Mitte</option>
-              <option value="contour">Außenkontur</option>
-              <option value="nearest">Nächster Punkt</option>
-              <option value="mesh">Punkt auf Modell</option>
-            </select>
-          </label>
-          <div id="color-palette" class="swatches" role="listbox" aria-label="Farbe des Merkmals"></div>
-          <label>
-            Ausgewählt
-            <select id="char-select"></select>
-          </label>
-          <p class="note">Klick auf ein Merkmal ordnet es dem ausgewählten Fähnchen zu. Der Schlüssel ist Objektname / Merkmalname.</p>
+          <div class="blk dis" id="blk-foot">
+            <h4><span class="n">3</span>Fußpunkt der Linie</h4>
+            <div class="seg" id="foot-seg">
+              <button type="button" data-foot="center"><span class="ic">⊙</span>Mitte</button>
+              <button type="button" data-foot="contour"><span class="ic">◌</span>Außenkontur</button>
+              <button type="button" data-foot="nearest"><span class="ic">⇢</span>Nächster Punkt</button>
+              <button type="button" data-foot="mesh"><span class="ic">✋</span>Manuell</button>
+            </div>
+            <label class="sr-only">
+              Fußpunkt
+              <select id="foot-mode">
+                <option value="center">Mitte</option>
+                <option value="contour">Außenkontur</option>
+                <option value="nearest">Nächster Punkt</option>
+                <option value="mesh">Manuell</option>
+              </select>
+            </label>
+          </div>
+          <div class="blk dis" id="blk-label">
+            <h4><span class="n">4</span>Label</h4>
+            <div class="seg" id="size-seg">
+              <button type="button" data-size="S"><span class="ic ic-s">Aa</span>Klein</button>
+              <button type="button" data-size="M"><span class="ic ic-m">Aa</span>Mittel</button>
+              <button type="button" data-size="L"><span class="ic ic-l">Aa</span>Groß</button>
+            </div>
+            <p class="note">Label im 3D ziehen zum Verschieben</p>
+          </div>
+          <div class="confirm">
+            <button type="button" id="assign-confirm" class="big go" disabled>✓ Bestätigen<br /><span class="sub">weiter zu Merkmal 2</span></button>
+            <p id="confirm-hint" class="hint-line">oder Enter drücken</p>
+            <button type="button" id="assign-next" class="ghost">Überspringen</button>
+            <button type="button" id="finish" hidden>Fertig</button>
+          </div>
+        </div>
+        <details id="appearance">
+          <summary>Darstellung</summary>
+          <label class="checkline"><input id="snap" type="checkbox" checked /> Knoten fangen</label>
+          <label class="sr-only">Ausgewählt <select id="char-select"></select></label>
           <div id="char-list" class="char-list"></div>
+          <div id="color-palette" class="swatches" role="listbox" aria-label="Farbe des Merkmals"></div>
           <div id="geo-panel" hidden>
-            <h2>Geometrie</h2>
             <div class="geo-grid">
               <label>Farbe <input id="geo-color" type="color" value="#d0121a" /></label>
               <label>Linie <input id="geo-width" type="range" min="1" max="8" step="0.5" value="2.5" /></label>
@@ -195,14 +245,17 @@
                   <option value="center">Mitte</option>
                   <option value="contour">Außenkontur</option>
                   <option value="nearest">Nächster Punkt</option>
-                  <option value="mesh">Punkt auf Modell</option>
+                  <option value="mesh">Manuell</option>
                 </select>
               </label>
             </div>
             <button type="button" id="geo-delete">Geometrie löschen</button>
           </div>
-          <details id="appearance">
-          <summary>Darstellung</summary>
+          <div id="view-dialog" class="view-dialog" hidden>
+            <label>Name <input id="view-name" type="text" maxlength="64" placeholder="rev-b" /></label>
+            <button type="button" id="view-save-ok">Speichern</button>
+            <ul id="view-list" class="pick-list"></ul>
+          </div>
           <h2>Beschriftung</h2>
           <form id="template-form">
             <label>
@@ -248,19 +301,44 @@
             <input id="refresh-seconds" type="number" min="5" max="3600" step="5" value="60" />
             Sekunden. Der lokale Helfer holt DataLoop in seinem eigenen Intervall.
           </label>
-          </details>
-        </aside>
-        <div id="stage">
-          <canvas id="view" aria-label="3D-Ansicht des Bauteils"></canvas>
-          <svg id="leaders" aria-hidden="true"></svg>
-          <div id="flags"></div>
-          <p id="hint" class="hint" hidden></p>
-          <p id="toast" class="toast" role="status" hidden></p>
-          <div id="loading" role="status" aria-live="polite">
-            <div class="spinner" aria-hidden="true"></div>
-            <p id="loading-text">Modell wird geladen …</p>
-          </div>
+        </details>
+      </aside>
+      <section id="timeline" hidden>
+        <div id="date-pop" class="datepop" hidden>
+          <label>Von <input id="pop-from" type="date" /></label>
+          <label>Bis <input id="pop-to" type="date" /></label>
+          <button type="button" id="pop-apply" class="primary">Übernehmen</button>
         </div>
+        <div class="tlbar">
+          <b id="timeline-title">Gemessene Teile pro Monat</b>
+          <span id="range-note" class="chip">Letzte 25 Teile</span>
+          <span id="timeline-total" class="sr-only">0 Teile</span>
+          <div class="spacer"></div>
+          <span class="lbl">Schnellwahl:</span>
+          <div class="presets filter-quick" role="group" aria-label="Schnellauswahl">
+            <button type="button" data-count="10">Letzte 10</button>
+            <button type="button" data-count="20">Letzte 20</button>
+            <button type="button" data-count="25">Letzte 25</button>
+            <button type="button" data-count="50">Letzte 50</button>
+            <button type="button" data-count="all">Alle</button>
+            <button type="button" id="range-pop">Zeitraum …</button>
+          </div>
+          <label class="filter sr-only">Letzte <input id="filter-count" type="number" min="1" max="5000" value="25" aria-label="Anzahl der letzten Teile" /> Teile</label>
+          <label class="filter sr-only">Von <input id="filter-from" type="date" aria-label="Von Datum" /></label>
+          <label class="filter sr-only">Bis <input id="filter-to" type="date" aria-label="Bis Datum" /></label>
+          <button type="button" id="timeline-hide">▾ Ausblenden</button>
+        </div>
+        <div id="hist" class="hist">
+          <div id="timeline-bars" class="bars"></div>
+          <div id="hist-years"></div>
+          <div id="hist-sel" class="sel" hidden></div>
+          <div id="hist-axis" class="axis"></div>
+        </div>
+        <p class="legend hist-legend">Balken anklicken = Monat wählen · über mehrere Balken ziehen = Zeitraum · Schnellwahl oben = zurück zu „Letzte X Teile“</p>
+      </section>
+      <div id="timeline-collapsed" class="showtl" hidden>
+        <span id="collapsed-chip" class="chip">Letzte 25 Teile</span>
+        <button type="button" id="timeline-show" class="primary">▴ Zeitraum-Übersicht einblenden</button>
       </div>
     </div>
     <script type="module" src="js/app.js"></script>

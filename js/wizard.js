@@ -27,9 +27,13 @@ const els = {
   models: document.getElementById("model-results"),
   modelsNext: document.getElementById("models-next"),
   small: document.getElementById("small-labels"),
+  smallWrap: document.getElementById("small-wrap"),
   cap: document.getElementById("control-cap"),
+  controlQ: document.getElementById("control-q"),
   controls: document.getElementById("control-results"),
   apply: document.getElementById("controls-apply"),
+  back: document.getElementById("wizard-back"),
+  title: document.querySelector("#wizard .wizard-head h2"),
 };
 
 const picked = {
@@ -44,6 +48,9 @@ const picked = {
 
 let onApply = () => {};
 let onPreview = () => {};
+let onStepChange = () => {};
+let previewToken = 0;
+let loadedToast = 0;
 
 export function labelCap(small) {
   return small ? 20 : 10;
@@ -57,11 +64,16 @@ export function formatBytes(bytes) {
   return `${n} B`;
 }
 
-export function startWizard({ apply, previewModels }) {
+export function startWizard({ apply, previewModels, onStep }) {
   onApply = apply;
   onPreview = previewModels || (() => {});
+  onStepChange = onStep || (() => {});
   els.root.hidden = false;
   showPanel("search");
+  document.addEventListener("wizard-go", (event) => {
+    if (!event.detail) return;
+    showPanel(event.detail);
+  });
   els.settingsBtn.addEventListener("click", () => {
     els.settingsPanel.hidden = !els.settingsPanel.hidden;
     if (!els.settingsPanel.hidden) loadSettings().catch((error) => fail(error));
@@ -84,6 +96,22 @@ export function startWizard({ apply, previewModels }) {
   });
   els.pieceGo.addEventListener("click", () => loadPieces().catch((error) => fail(error)));
   els.modelsNext.addEventListener("click", () => openControls().catch((error) => fail(error)));
+  if (els.back) {
+    els.back.addEventListener("click", () => {
+      const order = ["search", "choice", "models", "controls"];
+      const current = order.find((name) => els.root.querySelector(`[data-panel="${name}"]`) && !els.root.querySelector(`[data-panel="${name}"]`).hidden) || "search";
+      const index = Math.max(0, order.indexOf(current) - 1);
+      showPanel(order[index]);
+    });
+  }
+  if (els.controlQ) {
+    els.controlQ.addEventListener("input", () => {
+      const query = els.controlQ.value.trim().toLowerCase();
+      for (const item of els.controls.querySelectorAll("li")) {
+        item.hidden = query ? !item.textContent.toLowerCase().includes(query) : false;
+      }
+    });
+  }
   els.small.addEventListener("change", () => {
     const keep = new Set([...els.controls.querySelectorAll("input:checked")].map((box) => box.dataset.id));
     renderControls(picked.controls);
@@ -97,19 +125,30 @@ export function startWizard({ apply, previewModels }) {
     updateCap();
   });
   els.apply.addEventListener("click", () => finish().catch((error) => fail(error)));
-  for (const button of els.root.querySelectorAll("[data-wizard-step]")) {
-    button.addEventListener("click", () => showPanel(button.dataset.wizardStep));
-  }
   loadSettings().catch(() => {});
 }
 
 function showPanel(name) {
+  els.root.hidden = false;
+  const titles = {
+    search: "Projekt suchen",
+    choice: "Teilevorlage wählen",
+    models: "Referenzobjekt wählen",
+    controls: "Merkmale auswählen",
+  };
+  if (els.title && titles[name]) els.title.textContent = titles[name];
+  if (name !== "models") {
+    const toast = document.getElementById("toast");
+    if (toast) toast.hidden = true;
+  }
   for (const panel of els.root.querySelectorAll("[data-panel]")) {
     panel.hidden = panel.dataset.panel !== name;
   }
-  for (const button of els.root.querySelectorAll("[data-wizard-step]")) {
-    button.classList.toggle("is-current", button.dataset.wizardStep === name);
-  }
+  if (els.modelsNext) els.modelsNext.hidden = name !== "models";
+  if (els.apply) els.apply.hidden = name !== "controls";
+  if (els.smallWrap) els.smallWrap.hidden = name !== "controls";
+  if (els.back) els.back.hidden = name === "search";
+  onStepChange(name);
 }
 
 function fail(error) {
@@ -277,13 +316,20 @@ async function showModels(pieceId) {
     box.checked = !duplicate && !large && !huge;
     box.dataset.hash = model.hash;
     box.dataset.name = model.name;
+    box.dataset.size = String(Number(model.sizeBytes) || 0);
+    box.addEventListener("change", () => {
+      previewNow().catch((error) => fail(error));
+    });
     const text = document.createElement("span");
     const notes = [formatBytes(model.sizeBytes)];
     if (duplicate) notes.push("gleiche Datei");
     if (huge) notes.push("über 300 MB, Bestätigung nötig");
     else if (large) notes.push("über 50 MB");
-    text.innerHTML = `${escapeHtml(model.name)} <span class="${large ? "meta warn" : "meta"}">${escapeHtml(notes.filter(Boolean).join(" · "))}</span>`;
-    label.append(box, text);
+    text.innerHTML = `<span class="t">${escapeHtml(model.name)}</span> <span class="${large ? "meta warn" : "meta"}">${escapeHtml(notes.filter(Boolean).join(" · "))}</span>`;
+    const status = document.createElement("span");
+    status.className = "loaded-tag";
+    status.hidden = true;
+    label.append(box, text, status);
     const item = document.createElement("li");
     item.append(label);
     els.models.append(item);
@@ -294,8 +340,55 @@ async function showModels(pieceId) {
     els.models.append(item);
   }
   showPanel("models");
-  const chosen = selectedRecords();
-  if (chosen.length) onPreview(chosen).catch((error) => fail(error));
+  previewNow().catch((error) => fail(error));
+}
+
+function markLoaded(models) {
+  const hashes = new Set(models.map((model) => model.hash));
+  for (const box of els.models.querySelectorAll("input")) {
+    const tag = box.parentElement?.querySelector(".loaded-tag");
+    if (!tag) continue;
+    const on = box.checked && hashes.has(box.dataset.hash);
+    tag.hidden = !on;
+    tag.textContent = on ? "im 3D" : "";
+  }
+}
+
+async function previewNow() {
+  const token = ++previewToken;
+  let models = selectedRecords();
+  const huge = models.filter((model) => Number(model.sizeBytes) > HUGE_BYTES);
+  if (huge.length && !confirmHuge(huge)) {
+    for (const box of els.models.querySelectorAll("input:checked")) {
+      if (Number(box.dataset.size) > HUGE_BYTES) box.checked = false;
+    }
+    models = selectedRecords();
+  }
+  markLoaded([]);
+  await onPreview(models, (info) => {
+    if (token !== previewToken) return;
+    const bar = document.getElementById("load-progress");
+    const label = document.getElementById("load-progress-label");
+    const fill = document.querySelector("#load-progress-bar i") || document.getElementById("load-progress-bar");
+    if (!bar) return;
+    bar.hidden = false;
+    const pct = info.total ? Math.min(100, Math.round((info.got / info.total) * 100)) : 0;
+    if (label) label.textContent = info.total ? `${info.name}: ${pct}%` : `${info.name} wird geladen …`;
+    if (fill && fill.tagName === "I") fill.style.width = info.total ? `${pct}%` : "40%";
+  });
+  if (token !== previewToken) return;
+  const bar = document.getElementById("load-progress");
+  if (bar) bar.hidden = true;
+  markLoaded(models);
+  if (models.length) {
+    const toast = document.getElementById("toast");
+    if (toast) {
+      toast.hidden = false;
+      toast.textContent = `${models[models.length - 1].name} geladen`;
+      clearTimeout(loadedToast);
+      loadedToast = setTimeout(() => { toast.hidden = true; }, 2200);
+    }
+  }
 }
 
 function confirmHuge(models) {
@@ -341,10 +434,19 @@ function renderControls(controls) {
       }
       updateCap();
     });
-    const text = document.createElement("span");
-    const title = control.label || controlLabel(control);
-    text.innerHTML = `${escapeHtml(title)} <span class="meta">${escapeHtml(control.type || "")}</span>`;
-    label.append(box, text);
+    label.classList.add("ctr");
+    const objectName = document.createElement("span");
+    objectName.className = "t";
+    objectName.textContent = control.objectName || "";
+    const name = document.createElement("span");
+    name.textContent = control.name || control.controlName || "";
+    const type = document.createElement("span");
+    type.className = "s";
+    type.textContent = control.type || "";
+    const full = document.createElement("span");
+    full.className = "full";
+    full.textContent = control.label || controlLabel(control);
+    label.append(box, objectName, name, type, full);
     const item = document.createElement("li");
     item.append(label);
     els.controls.append(item);
@@ -361,7 +463,8 @@ function renderControls(controls) {
 function updateCap() {
   const cap = labelCap(els.small.checked);
   const chosen = els.controls.querySelectorAll("input:checked").length;
-  els.cap.textContent = `${chosen} von ${cap}`;
+  els.cap.textContent = `${chosen} / ${cap}`;
+  els.cap.classList.toggle("full", chosen >= cap);
 }
 
 function selectedModels() {

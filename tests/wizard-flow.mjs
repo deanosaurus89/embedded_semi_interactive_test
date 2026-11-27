@@ -41,7 +41,7 @@ function json(res, obj) {
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, "http://127.0.0.1");
   const route = url.pathname;
-  if (route === "/api/version") return json(res, { name: "DL-Merkmal-Viewer", version: "0.9.0" });
+  if (route === "/api/version") return json(res, { name: "DL-Merkmal-Viewer", version: "1.0.0" });
   if (route === "/api/settings" && req.method === "GET") return json(res, { server: "", tokenSet: false, pollSeconds: 60 });
   if (route === "/api/settings" && req.method === "POST") {
     let raw = "";
@@ -95,12 +95,13 @@ const browser = await puppeteer.launch({
   defaultViewport: { width: 1440, height: 900 },
 });
 const page = await browser.newPage();
+page.on("pageerror", (error) => console.error("PAGE", error.message));
 page.setDefaultTimeout(60000);
 await page.goto(`http://127.0.0.1:${port}/index.html?probe=1`, { waitUntil: "domcontentloaded" });
 await page.waitForSelector("#wizard:not([hidden])");
 const version = await page.$eval("#app-version", (el) => el.textContent.trim());
 const noteHidden = await page.$eval("#demo-note", (el) => el.hidden);
-if (version !== "0.9.0" || !noteHidden) throw new Error(`Start falsch version=${version} note=${noteHidden}`);
+if (version !== "1.0.0" || !noteHidden) throw new Error(`Start falsch version=${version} note=${noteHidden}`);
 await page.type("#project-q", "Projekt");
 await page.click("#project-search");
 await page.waitForSelector("#project-results button");
@@ -147,7 +148,7 @@ await page.evaluate(() => {
   boxes[10].dispatchEvent(new Event("change"));
 });
 const opened = await page.$eval("#control-cap", (el) => el.textContent);
-if (!opened.includes("11 von 20")) throw new Error(`Kleine Beschriftungen: ${opened}`);
+if (!opened.includes("11 / 20")) throw new Error(`Kleine Beschriftungen: ${opened}`);
 await page.screenshot({ path: path.join(shots, "wizard-merkmale.png") });
 await page.evaluate(() => {
   const boxes = [...document.querySelectorAll("#control-results input")];

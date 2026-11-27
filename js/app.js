@@ -23,6 +23,7 @@ import { startWizard } from "./wizard.js";
 import { centerPoint, constrainToContour, distancePointToTriangle, footOnFeature, nearestFoot } from "./anchors.js";
 import { viewDocument } from "./views.js";
 import { controlLabel } from "./labels.js";
+import { aggregateBuckets, bucketsFromPieces, chipLabel, presetIndex, spanLabel } from "./histogram.js";
 
 // Anchors and geometries are stored in the original OBJ coordinate system.
 // The mesh is not moved, so a raycast hit can be saved as-is.
@@ -40,7 +41,7 @@ const UI = {
   dataError: "Die Daten konnten nicht geladen werden.",
   webglError: "WebGL ist in diesem Browser nicht verfügbar.",
   emptyModel: "Das Modell enthält keine Flächen.",
-  hint: "Linke Maustaste dreht die Ansicht, ein kurzer Klick setzt einen Punkt. Mittlere und rechte Maustaste verschieben. Das Mausrad zoomt.",
+  hint: "Drehen: linke Maustaste. Verschieben: mittlere oder rechte Maustaste. Zoom: Mausrad.",
   pickFirst: "Zuerst ein Merkmal in der Liste oder ein Fähnchen wählen.",
   pickMiss: "Kein Treffer auf der Oberfläche.",
   anchorSet: "Fußpunkt gesetzt.",
@@ -109,11 +110,40 @@ const els = {
   geometryTypeWrap: document.getElementById("geometry-type-wrap"),
   assignNext: document.getElementById("assign-next"),
   assignDone: document.getElementById("assign-done"),
+  assignConfirm: document.getElementById("assign-confirm"),
+  confirmHint: document.getElementById("confirm-hint"),
   editorClose: document.getElementById("editor-close"),
+  steps: document.getElementById("steps"),
+  modeView: document.getElementById("mode-view"),
   timeline: document.getElementById("timeline"),
   timelineBars: document.getElementById("timeline-bars"),
   timelineTotal: document.getElementById("timeline-total"),
+  timelineTitle: document.getElementById("timeline-title"),
+  timelineHide: document.getElementById("timeline-hide"),
+  timelineShow: document.getElementById("timeline-show"),
+  timelineCollapsed: document.getElementById("timeline-collapsed"),
+  collapsedChip: document.getElementById("collapsed-chip"),
   rangeNote: document.getElementById("range-note"),
+  stats: document.getElementById("stats"),
+  statsTotal: document.getElementById("stats-total"),
+  statsSpan: document.getElementById("stats-span"),
+  hist: document.getElementById("hist"),
+  histYears: document.getElementById("hist-years"),
+  histSel: document.getElementById("hist-sel"),
+  histAxis: document.getElementById("hist-axis"),
+  datePop: document.getElementById("date-pop"),
+  rangePop: document.getElementById("range-pop"),
+  popFrom: document.getElementById("pop-from"),
+  popTo: document.getElementById("pop-to"),
+  popApply: document.getElementById("pop-apply"),
+  assignBar: document.getElementById("assign-bar"),
+  merkmalChips: document.getElementById("merkmal-chips"),
+  assignSwatch: document.getElementById("assign-swatch"),
+  pointSlots: document.getElementById("point-slots"),
+  blkType: document.getElementById("blk-type"),
+  blkPoints: document.getElementById("blk-points"),
+  blkFoot: document.getElementById("blk-foot"),
+  blkLabel: document.getElementById("blk-label"),
   colorPalette: document.getElementById("color-palette"),
   viewSave: document.getElementById("view-save"),
   viewOpen: document.getElementById("view-open"),
@@ -166,6 +196,10 @@ const state = {
   holdLayout: false,
   liveTimer: 0,
   liveInterval: 60,
+  wizardStep: "search",
+  histCollapsed: false,
+  timelineBody: null,
+  histDrag: null,
 };
 
 const PICK_MIN = { Linie: 2, Kreis: 3, Ebene: 4, Kugel: 4, Zylinder: 4, Kegel: 4, Langloch: 4 };
@@ -345,33 +379,21 @@ async function startAuthor(params) {
       toast(error.message || "Ansicht nicht geladen");
     }
   }
-  startWizard({ apply: applyAuthorSelection, previewModels: (models) => loadHashedModels(models, false) });
+  startWizard({
+    apply: applyAuthorSelection,
+    previewModels: (models, onProgress) => loadHashedModels(models, false, onProgress),
+    onStep: (name) => {
+      state.wizardStep = name;
+      renderSteps();
+      syncModes();
+    },
+  });
 }
 
 async function applyAuthorSelection(selection) {
   els.loading.hidden = false;
   els.loadingText.textContent = "Modelle werden geladen …";
-  clearModelGroup();
-  const seen = new Set();
-  for (const model of selection.models) {
-    if (!model.hash || seen.has(model.hash)) continue;
-    seen.add(model.hash);
-    const response = await fetch(`/api/models/${encodeURIComponent(model.hash)}`, { cache: "force-cache" });
-    if (!response.ok) throw new Error(`${model.name} konnte nicht geladen werden.`);
-    const parsed = new OBJLoader().parse(await response.text());
-    parsed.name = model.name || model.hash;
-    parsed.traverse((obj) => {
-      if (!obj.isMesh) return;
-      obj.material = new THREE.MeshStandardMaterial({
-        color: 0xb7bcc2,
-        metalness: 0.06,
-        roughness: 0.58,
-        side: THREE.FrontSide,
-      });
-    });
-    state.model.add(parsed);
-  }
-  indexLoadedModel(state.model);
+  await loadHashedModels(selection.models, false);
   const partTemplate = selection.template?.id
     ? { id: selection.template.id, name: selection.template.name || "" }
     : { id: `piece:${selection.piece?.id || "teil"}`, name: selection.piece?.name || "" };
@@ -484,6 +506,8 @@ function acceptData(data, info) {
   syncChrome();
   syncEditor();
   updateLeaders();
+  if (info.initial || info.switched) restoreHistPrefs();
+  renderHistogram();
 }
 
 function adoptLivePlacements() {
@@ -523,6 +547,62 @@ function bindUi() {
     toast("Klicken Sie den neuen Fusspunkt oder eine Geometrie.");
   });
   els.prepare.addEventListener("click", () => beginEdit());
+  if (els.modeView) els.modeView.addEventListener("click", () => showViewMode());
+  if (els.steps) {
+    els.steps.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-wizard-step]");
+      if (!button || document.body.dataset.mode !== "author") return;
+      const step = button.dataset.wizardStep;
+      if (step === "edit") {
+        beginEdit();
+        return;
+      }
+      if (step === "view") {
+        showViewMode();
+        return;
+      }
+      document.dispatchEvent(new CustomEvent("wizard-go", { detail: step }));
+    });
+  }
+  document.getElementById("type-seg")?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-tool]");
+    if (!button || !els.tool) return;
+    els.tool.value = button.dataset.tool;
+    els.tool.dispatchEvent(new Event("change"));
+  });
+  document.getElementById("foot-seg")?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-foot]");
+    if (!button) return;
+    setFootMode(button.dataset.foot);
+    syncDock();
+  });
+  document.getElementById("size-seg")?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-size]");
+    if (!button || !state.selectedId) return;
+    const placement = state.setup?.placements?.[state.selectedId];
+    if (placement) placement.labelSize = button.dataset.size;
+    if (state.setup?.labelTemplate) state.setup.labelTemplate.size = button.dataset.size;
+    refreshFlagContents();
+    syncDock();
+  });
+  if (els.assignConfirm) els.assignConfirm.addEventListener("click", () => confirmMerkmal());
+  if (els.timelineHide) els.timelineHide.addEventListener("click", () => setHistCollapsed(true));
+  if (els.timelineShow) els.timelineShow.addEventListener("click", () => setHistCollapsed(false));
+  if (els.rangePop) {
+    els.rangePop.addEventListener("click", () => {
+      if (!els.datePop) return;
+      els.datePop.hidden = !els.datePop.hidden;
+      if (els.popFrom) els.popFrom.value = state.filterFrom || "";
+      if (els.popTo) els.popTo.value = state.filterTo || "";
+    });
+  }
+  if (els.popApply) {
+    els.popApply.addEventListener("click", () => {
+      applyFilter({ from: els.popFrom?.value || "", to: els.popTo?.value || "", count: "all" });
+      if (els.datePop) els.datePop.hidden = true;
+    });
+  }
+  if (els.hist) bindHistogram();
   els.finish.addEventListener("click", () => finishEdit());
   els.discard.addEventListener("click", () => discardEdit());
   els.exportBtn.addEventListener("click", exportSetup);
@@ -546,7 +626,15 @@ function bindUi() {
   });
   els.planeClose.addEventListener("click", closePolyline);
   window.addEventListener("keydown", (event) => {
-    if (event.key !== "Enter" || !state.edit || state.tool !== "Ebene" || state.planeKind !== "polyline") return;
+    if (event.key !== "Enter" || !state.edit) return;
+    const tag = event.target?.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+    if (confirmReady()) {
+      event.preventDefault();
+      confirmMerkmal();
+      return;
+    }
+    if (state.tool !== "Ebene" || state.planeKind !== "polyline") return;
     if (state.picks.length < 3 || state.polylineClosed) return;
     event.preventDefault();
     closePolyline();
@@ -673,6 +761,8 @@ function applyFilter(patch, persist = true) {
   }
   refreshFlagContents();
   updateRangeNote();
+  if (persist) saveHistPrefs();
+  renderHistogram();
   source?.refresh?.();
   if (state.holdLayout) pollLiveNow();
 }
@@ -1110,21 +1200,57 @@ function applyCamera(saved) {
 }
 
 function beginEdit() {
+  if (!state.setup && !state.saved) {
+    toast("Zuerst ein Projekt wählen.");
+    return;
+  }
   state.edit = true;
-  state.setup = clone(state.saved);
+  state.setup = clone(state.saved || state.setup);
   document.body.classList.add("is-editing");
   state.viewLocked = false;
   syncViewLock();
   els.editor.hidden = false;
+  if (els.wizard) els.wizard.hidden = true;
   const keys = Object.keys(state.setup?.placements || {});
   if (!state.selectedId || !keys.includes(state.selectedId)) state.selectedId = keys[0] || null;
   updatePickStatus();
   syncChrome();
   syncEditor();
+  renderHistogram();
   resizeRenderer();
   updateHint();
   updateLeaders();
   markSelection();
+}
+
+function showViewMode() {
+  if (!state.data) {
+    toast("Zuerst Referenz und Merkmale wählen.");
+    return;
+  }
+  if (state.edit) {
+    try {
+      writeDraft(state.setup);
+      state.saved = clone(state.setup);
+      state.usingDraft = true;
+    } catch {
+      /* the view still switches; Fertig reports a save error */
+    }
+    state.edit = false;
+    state.draftPoints = [];
+    document.body.classList.remove("is-editing");
+    if (els.editor) els.editor.hidden = true;
+    state.viewLocked = true;
+    state.reconnect = false;
+    syncViewLock();
+    resetPicks();
+  }
+  if (els.wizard) els.wizard.hidden = true;
+  syncChrome();
+  updateHint();
+  updateLeaders();
+  renderHistogram();
+  resizeRenderer();
 }
 
 function finishEdit() {
@@ -1149,6 +1275,8 @@ function finishEdit() {
   syncChrome();
   updateHint();
   updateLeaders();
+  renderHistogram();
+  resizeRenderer();
   toast(UI.finished);
 }
 
@@ -1353,7 +1481,7 @@ function makeFlag(key) {
 function fillFlag(article, key) {
   const characteristic = characteristicFor(key);
   const template = state.setup.labelTemplate;
-  article.dataset.size = template.size;
+  article.dataset.size = state.setup.placements?.[key]?.labelSize || template.size;
   if (!characteristic) {
     article.classList.remove("is-oot");
     article.dataset.n = "0";
@@ -1782,7 +1910,8 @@ function updatePickStatus() {
   updatePlaneUi();
   const need = minimumFor(state.tool);
   if (!need) {
-    els.pickStatus.textContent = "Ein Klick setzt den Fußpunkt.";
+    els.pickStatus.textContent = placedMerkmal(state.selectedId) ? "Fußpunkt gesetzt." : "Ein Klick setzt den Fußpunkt.";
+    syncDock();
     return;
   }
   const have = state.picks.length;
@@ -1790,10 +1919,12 @@ function updatePickStatus() {
     els.pickStatus.textContent = have < 3
       ? `Ebene: Punkt ${have + 1} von 3`
       : "Klick auf den ersten Punkt schliesst den Linienzug";
+    syncDock();
     return;
   }
   if (state.extraArmed) {
     els.pickStatus.textContent = `${state.tool}: weiterer Punkt, bisher ${have}.`;
+    syncDock();
     return;
   }
   if (have < need) {
@@ -1801,14 +1932,15 @@ function updatePickStatus() {
     els.pickStatus.textContent = hint
       ? `${state.tool}: Punkt ${have + 1} von ${need} = ${hint}`
       : `${state.tool}: Punkt ${have + 1} von ${need}`;
+    syncDock();
     return;
   }
   els.pickStatus.textContent = `${state.tool}: Punkt ${have} von ${need}`;
+  syncDock();
 }
 
 function showPickControls() {
-  const active = state.tool !== "point" && state.picks.length > 0;
-  els.fitPreview.hidden = !active;
+  if (els.fitPreview) els.fitPreview.hidden = false;
   els.fitOk.hidden = !state.preview;
   els.fitMore.hidden = !(state.preview && PICK_EXTRA.has(state.tool));
   if (!state.preview) els.fitSummary.textContent = els.pickStatus.textContent;
@@ -1820,7 +1952,6 @@ function resetPicks() {
   state.polylineClosed = false;
   state.nearFirst = false;
   state.preview = null;
-  if (els.fitPreview) els.fitPreview.hidden = true;
   updatePickMarkers();
   updatePickStatus();
   rebuildGeometries();
@@ -1875,8 +2006,9 @@ function updatePickMarkers() {
   }
   state.picks.forEach((pick, index) => {
     const closeHint = index === 0 && state.nearFirst && state.tool === "Ebene" && state.planeKind === "polyline" && state.picks.length >= 3 && !state.polylineClosed;
+    const markerColor = closeHint ? "#128a3e" : (colorForKey(state.selectedId) || "#1d4ed8");
     const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
-      map: numberTexture(index + 1, closeHint ? "#128a3e" : "#1d4ed8"),
+      map: numberTexture(index + 1, markerColor),
       depthTest: false,
       depthWrite: false,
     }));
@@ -2058,7 +2190,7 @@ function geometryFromFit(fit, points = []) {
     type: typeMap[fit.type] || "circle",
     mode: "fit",
     fitType: fit.type,
-    color: nextColor(),
+    color: colorForKey(state.selectedId) || nextColor(),
     lineWidth: 2.5,
     opacity: 0.85,
     attach: "center",
@@ -2265,6 +2397,43 @@ function probeApi() {
     hit(clientX, clientY) {
       return pickSurface({ clientX, clientY });
     },
+    armReady() {
+      const key = state.selectedId || Object.keys(state.setup.placements || {})[0];
+      state.selectedId = key;
+      state.edit = true;
+      state.tool = "Ebene";
+      state.planeKind = "quad";
+      if (els.tool) els.tool.value = "Ebene";
+      const color = colorForKey(key);
+      state.picks = [0, 1, 2, 3].map((index) => ({ id: index, point: [index, 0, 0], normal: [0, 0, 1] }));
+      state.preview = {
+        id: "geo-armed",
+        type: "plane",
+        mode: "fit",
+        fitType: "Ebene",
+        color,
+        lineWidth: 2.5,
+        opacity: 0.9,
+        attach: "center",
+        center: { x: 0, y: 0, z: 0 },
+        normal: { x: 0, y: 0, z: 1 },
+        outline: [
+          { x: -30, y: -16, z: 0 },
+          { x: 30, y: -16, z: 0 },
+          { x: 30, y: 16, z: 0 },
+          { x: -30, y: 16, z: 0 },
+          { x: -30, y: -16, z: 0 },
+        ],
+        planeKind: "quad",
+        summary: "Ebene",
+        form: 0,
+      };
+      document.body.classList.add("is-editing");
+      els.editor.hidden = false;
+      rebuildGeometries();
+      updatePickStatus();
+      return { enabled: els.assignConfirm ? !els.assignConfirm.disabled : false, color };
+    },
     view() {
       return {
         position: [camera.position.x, camera.position.y, camera.position.z],
@@ -2283,12 +2452,13 @@ function probeApi() {
       controls.update();
       controls.enableDamping = damping;
     },
-    gridPlane(count = 4) {
+    gridPlane(count = 4, origin = 0) {
       const rect = els.view.getBoundingClientRect();
       const mesh = state.meshIndex;
       const buckets = new Map();
-      for (let y = rect.top + 24; y < rect.bottom - 16; y += 42) {
-        for (let x = rect.left + 16; x < rect.right - 16; x += 42) {
+      const shift = Number(origin) || 0;
+      for (let y = rect.top + 24 + shift; y < rect.bottom - 16; y += 42) {
+        for (let x = rect.left + 16 + shift; x < rect.right - 16; x += 42) {
           const hit = this.hit(x, y);
           const face = hit && mesh.faces[hit.faceIndex];
           if (!face) continue;
@@ -2818,47 +2988,191 @@ async function loadTimeline() {
 }
 
 function drawTimeline(body) {
-  if (!els.timeline || !els.timelineBars) return;
-  els.timeline.hidden = false;
-  if (els.timelineTotal) els.timelineTotal.textContent = `${body.total || 0} Teile`;
+  state.timelineBody = body || { total: 0, buckets: [] };
+  renderHistogram();
+}
+
+function histScope() {
+  return state.session?.name || state.session?.templateId || state.session?.pieceId || state.data?.part?.id || "demo";
+}
+
+function saveHistPrefs() {
+  try {
+    localStorage.setItem(`milkyway-hist-v1:${histScope()}`, JSON.stringify({
+      collapsed: Boolean(state.histCollapsed),
+      count: state.filterCount,
+      from: state.filterFrom,
+      to: state.filterTo,
+    }));
+  } catch {
+    /* ignore */
+  }
+}
+
+function restoreHistPrefs() {
+  try {
+    const raw = localStorage.getItem(`milkyway-hist-v1:${histScope()}`);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    state.histCollapsed = Boolean(parsed.collapsed);
+    applyFilter({
+      count: parsed.count ?? 25,
+      from: parsed.from || "",
+      to: parsed.to || "",
+    }, false);
+  } catch {
+    /* ignore */
+  }
+}
+
+function setHistCollapsed(collapsed) {
+  state.histCollapsed = collapsed;
+  saveHistPrefs();
+  renderHistogram();
+}
+
+function timelineSource() {
+  if (state.timelineBody) return state.timelineBody;
+  if (state.data?.characteristics) return bucketsFromPieces(state.data.characteristics);
+  return { total: 0, buckets: [] };
+}
+
+function viewingLayout() {
+  return Boolean(state.data) && !state.edit && !(els.wizard && !els.wizard.hidden);
+}
+
+function renderHistogram() {
+  const sourceBody = timelineSource();
+  const series = aggregateBuckets(sourceBody.buckets || []);
+  const total = Number(sourceBody.total) || series.total;
+  if (els.statsTotal) els.statsTotal.textContent = String(total);
+  if (els.statsSpan) els.statsSpan.textContent = spanLabel(series.bars);
+  if (els.timelineTotal) els.timelineTotal.textContent = `${total} Teile`;
+  const label = chipLabel({
+    grain: series.grain,
+    bars: series.bars,
+    from: state.filterFrom,
+    to: state.filterTo,
+    count: state.filterCount,
+  });
+  if (els.rangeNote) els.rangeNote.textContent = label;
+  if (els.collapsedChip) els.collapsedChip.textContent = label;
+  if (els.timelineTitle) els.timelineTitle.textContent = series.grain === "week" ? "Gemessene Teile pro Woche" : "Gemessene Teile pro Monat";
+  const show = viewingLayout();
+  if (els.stats) els.stats.hidden = !show;
+  if (!show) {
+    if (els.timeline) els.timeline.hidden = true;
+    if (els.timelineCollapsed) els.timelineCollapsed.hidden = true;
+    return;
+  }
+  if (els.timeline) els.timeline.hidden = state.histCollapsed;
+  if (els.timelineCollapsed) els.timelineCollapsed.hidden = !state.histCollapsed;
+  if (!els.timelineBars || state.histCollapsed) return;
+  const max = Math.max(1, ...series.bars.map((bar) => bar.count));
+  const presetFrom = state.filterFrom ? -1 : presetIndex(series.bars, state.filterCount);
   els.timelineBars.replaceChildren();
-  const buckets = body.buckets || [];
-  const max = Math.max(1, ...buckets.map((bucket) => Number(bucket.count) || 0));
-  let dragFrom = null;
-  const paint = (from, to) => {
-    for (const button of els.timelineBars.querySelectorAll("button")) {
-      const day = button.dataset.date;
-      button.classList.toggle("is-on", (!from && !to) || (day >= from && day <= to));
-    }
-  };
-  for (const bucket of buckets) {
+  series.bars.forEach((bar, index) => {
     const button = document.createElement("button");
     button.type = "button";
-    button.dataset.date = bucket.date;
-    button.title = `${bucket.date}: ${bucket.count}`;
-    button.style.height = `${Math.max(4, Math.round((Number(bucket.count) / max) * 48))}px`;
-    button.addEventListener("pointerdown", (event) => {
-      dragFrom = bucket.date;
-      button.setPointerCapture(event.pointerId);
-    });
-    button.addEventListener("pointerenter", () => {
-      if (!dragFrom) return;
-      const end = bucket.date;
-      paint(dragFrom < end ? dragFrom : end, dragFrom < end ? end : dragFrom);
-    });
-    button.addEventListener("pointerup", () => {
-      if (!dragFrom) return;
-      const end = bucket.date;
-      const from = dragFrom < end ? dragFrom : end;
-      const to = dragFrom < end ? end : dragFrom;
-      dragFrom = null;
-      applyFilter({ from, to });
-      paint(from, to);
-    });
+    button.dataset.index = String(index);
+    button.dataset.start = bar.start;
+    button.dataset.end = bar.end;
+    button.title = `${bar.start}: ${bar.count}`;
+    button.style.height = `${Math.max(4, Math.round((bar.count / max) * 100))}%`;
+    const inRange = state.filterFrom
+      ? !(bar.end < state.filterFrom || bar.start > state.filterTo || !state.filterTo)
+      : index >= presetFrom;
+    button.classList.toggle("in", inRange);
+    if (bar.count === max || index % 6 === 0) {
+      const value = document.createElement("span");
+      value.className = "v";
+      value.textContent = String(bar.count);
+      button.append(value);
+    }
     els.timelineBars.append(button);
+  });
+  if (els.histAxis) {
+    els.histAxis.replaceChildren();
+    for (const bar of series.bars) {
+      const tick = document.createElement("span");
+      const month = Number(bar.start.slice(5, 7));
+      tick.textContent = series.grain === "month" ? (month % 3 === 1 ? bar.label : "") : bar.label;
+      els.histAxis.append(tick);
+    }
   }
-  paint(state.filterFrom, state.filterTo);
-  updateRangeNote();
+  if (els.histYears) {
+    els.histYears.replaceChildren();
+    let lastYear = 0;
+    series.bars.forEach((bar, index) => {
+      if (bar.year === lastYear) return;
+      lastYear = bar.year;
+      const mark = document.createElement("div");
+      mark.className = "yr";
+      mark.style.left = `calc(${(index / Math.max(series.bars.length, 1)) * 100}%)`;
+      mark.textContent = String(bar.year);
+      els.histYears.append(mark);
+    });
+  }
+  if (els.histSel) {
+    if (state.filterFrom && state.filterTo && series.bars.length) {
+      const indexes = series.bars.map((bar, index) => ({ bar, index })).filter(({ bar }) => !(bar.end < state.filterFrom || bar.start > state.filterTo));
+      if (indexes.length) {
+        const first = indexes[0].index;
+        const last = indexes[indexes.length - 1].index;
+        const count = series.bars.length;
+        els.histSel.hidden = false;
+        els.histSel.style.left = `calc(${(first / count) * 100}% - 2px)`;
+        els.histSel.style.width = `calc(${((last - first + 1) / count) * 100}% + 1px)`;
+      } else els.histSel.hidden = true;
+    } else els.histSel.hidden = true;
+  }
+  for (const button of els.filterQuick?.querySelectorAll("[data-count]") || []) {
+    button.classList.toggle("is-on", !state.filterFrom && button.dataset.count === String(state.filterCount));
+  }
+}
+
+function bindHistogram() {
+  let drag = null;
+  const barAt = (event) => {
+    const bars = [...els.timelineBars.querySelectorAll("button")];
+    if (!bars.length) return null;
+    const rect = els.hist.getBoundingClientRect();
+    const index = Math.max(0, Math.min(bars.length - 1, Math.floor(((event.clientX - rect.left) / Math.max(rect.width, 1)) * bars.length)));
+    return bars[index];
+  };
+  els.hist.addEventListener("pointerdown", (event) => {
+    const bar = barAt(event);
+    if (!bar) return;
+    drag = bar.dataset.index;
+    els.hist.setPointerCapture?.(event.pointerId);
+  });
+  els.hist.addEventListener("pointermove", (event) => {
+    if (drag == null) return;
+    const bar = barAt(event);
+    if (!bar) return;
+    const from = Math.min(Number(drag), Number(bar.dataset.index));
+    const to = Math.max(Number(drag), Number(bar.dataset.index));
+    for (const button of els.timelineBars.querySelectorAll("button")) {
+      const index = Number(button.dataset.index);
+      button.classList.toggle("in", index >= from && index <= to);
+    }
+  });
+  const commit = (event) => {
+    if (drag == null) return;
+    const bar = barAt(event) || els.timelineBars.querySelector(`[data-index="${drag}"]`);
+    const start = Math.min(Number(drag), Number(bar?.dataset.index || drag));
+    const end = Math.max(Number(drag), Number(bar?.dataset.index || drag));
+    drag = null;
+    const buttons = [...els.timelineBars.querySelectorAll("button")];
+    const first = buttons[start];
+    const last = buttons[end];
+    if (!first || !last) return;
+    let count = 0;
+    for (let index = start; index <= end; index += 1) count += Number(buttons[index]?.title?.split(": ").pop()) || 0;
+    applyFilter({ from: first.dataset.start, to: last.dataset.end, count: Math.max(count, 1) });
+  };
+  els.hist.addEventListener("pointerup", commit);
+  els.hist.addEventListener("pointercancel", () => { drag = null; });
 }
 
 function saveNamedView() {
@@ -2984,16 +3298,56 @@ async function loadNamedView(name) {
   startLivePoll();
 }
 
-async function loadHashedModels(models, cachedOnly = false) {
+let modelLoadGen = 0;
+
+async function readModelText(response, onProgress, name) {
+  const total = Number(response.headers.get("Content-Length")) || 0;
+  if (!response.body) return response.text();
+  const reader = response.body.getReader();
+  const parts = [];
+  let got = 0;
+  while (true) {
+    const chunk = await reader.read();
+    if (chunk.done) break;
+    parts.push(chunk.value);
+    got += chunk.value.byteLength;
+    if (onProgress) onProgress({ name, got, total });
+  }
+  const buf = new Uint8Array(got);
+  let offset = 0;
+  for (const part of parts) {
+    buf.set(part, offset);
+    offset += part.byteLength;
+  }
+  return new TextDecoder().decode(buf);
+}
+
+async function loadHashedModels(models, cachedOnly = false, onProgress) {
+  const gen = ++modelLoadGen;
   if (!state.model) {
     state.model = new THREE.Group();
     scene.add(state.model);
   }
-  clearModelGroup();
+  const wanted = [];
   const seen = new Set();
   for (const model of models || []) {
     if (!model.hash || model.enabled === false || seen.has(model.hash)) continue;
     seen.add(model.hash);
+    wanted.push(model);
+  }
+  const keep = new Set(wanted.map((model) => model.hash));
+  for (const child of [...state.model.children]) {
+    if (keep.has(child.userData.hash)) continue;
+    child.traverse((obj) => {
+      if (obj.geometry) obj.geometry.dispose();
+      if (obj.material) obj.material.dispose();
+    });
+    state.model.remove(child);
+  }
+  const have = new Set([...state.model.children].map((child) => child.userData.hash));
+  for (const model of wanted) {
+    if (gen !== modelLoadGen) return;
+    if (have.has(model.hash)) continue;
     const suffix = cachedOnly ? "?cached=1" : "";
     const response = await fetch(`/api/models/${encodeURIComponent(model.hash)}${suffix}`, { cache: "force-cache" });
     if (!response.ok) {
@@ -3003,14 +3357,23 @@ async function loadHashedModels(models, cachedOnly = false) {
       }
       throw new Error(`${model.name || model.hash} fehlt`);
     }
-    const parsed = new OBJLoader().parse(await response.text());
+    const text = await readModelText(response, onProgress, model.name || model.hash);
+    if (gen !== modelLoadGen) return;
+    const parsed = new OBJLoader().parse(text);
+    parsed.name = model.name || model.hash;
+    parsed.userData.hash = model.hash;
     parsed.traverse((obj) => {
       if (!obj.isMesh) return;
-      obj.material = new THREE.MeshStandardMaterial({ color: 0xb7bcc2, metalness: 0.06, roughness: 0.58 });
+      obj.material = new THREE.MeshStandardMaterial({ color: 0xb7bcc2, metalness: 0.06, roughness: 0.58, side: THREE.FrontSide });
     });
     state.model.add(parsed);
   }
+  if (gen !== modelLoadGen) return;
   indexLoadedModel(state.model);
+  if (!cachedOnly && state.model.children.length) {
+    frameModel(state.model, null);
+    cameraIsSaved = false;
+  }
 }
 
 function updateSelectedGeometry(patch) {
@@ -3085,13 +3448,158 @@ function syncChrome() {
     els.viewBadge.hidden = !state.session?.name;
     els.viewBadge.textContent = state.session?.name ? `Ansicht: ${state.session.name}` : "";
   }
-  els.prepare.hidden = state.edit;
-  els.finish.hidden = !state.edit;
-  els.discard.hidden = !state.edit;
-  els.prepare.setAttribute("aria-pressed", String(state.edit));
-  if (state.setup && document.activeElement !== els.refreshSeconds) {
+  syncModes();
+  renderSteps();
+  if (state.setup && els.refreshSeconds && document.activeElement !== els.refreshSeconds) {
     els.refreshSeconds.value = String(state.setup.refreshSeconds || 60);
   }
+}
+
+function syncModes() {
+  const viewing = viewingLayout();
+  if (els.prepare) {
+    els.prepare.classList.toggle("on", !viewing);
+    els.prepare.setAttribute("aria-pressed", String(!viewing));
+    els.prepare.hidden = false;
+  }
+  if (els.modeView) {
+    els.modeView.classList.toggle("on", viewing);
+    els.modeView.setAttribute("aria-pressed", String(viewing));
+  }
+  if (els.finish) els.finish.hidden = !state.edit;
+  if (els.discard) els.discard.hidden = !state.edit;
+}
+
+function renderSteps() {
+  if (!els.steps) return;
+  const labels = ["Projekt", "Vorlage", "Referenz", "Merkmale", "Platzieren", "Ansicht"];
+  const keys = ["search", "choice", "models", "controls", "edit", "view"];
+  const map = { search: 0, choice: 1, models: 2, controls: 3, edit: 4, view: 5 };
+  let index = 5;
+  if (state.edit) index = 4;
+  else if (els.wizard && !els.wizard.hidden) index = map[state.wizardStep] ?? 0;
+  else if (!state.data) index = 0;
+  els.steps.innerHTML = labels.map((label, step) => {
+    const cls = step === index ? "on" : step < index ? "done" : "";
+    const mark = step < index ? "✓" : String(step + 1);
+    return `<button type="button" class="${cls}" data-wizard-step="${keys[step]}"><b>${mark}</b>${label}</button>`;
+  }).join("");
+}
+
+function placedMerkmal(key) {
+  const anchor = state.setup?.placements?.[key]?.anchor;
+  return Boolean(anchor && (anchor.point || anchor.geometryId || anchor.kind));
+}
+
+function confirmReady() {
+  if (!state.edit || !state.selectedId) return false;
+  if (state.picks.length) {
+    if (state.tool === "Ebene" && state.planeKind === "polyline") return state.polylineClosed && Boolean(state.preview);
+    return Boolean(state.preview);
+  }
+  return placedMerkmal(state.selectedId);
+}
+
+function confirmMerkmal() {
+  if (!confirmReady()) return;
+  if (state.preview) confirmPreview();
+  const keys = Object.keys(state.setup?.placements || {});
+  const start = Math.max(0, keys.indexOf(state.selectedId));
+  let nextId = null;
+  for (let step = 1; step <= keys.length; step += 1) {
+    const id = keys[(start + step) % keys.length];
+    if (!placedMerkmal(id)) {
+      nextId = id;
+      break;
+    }
+  }
+  if (!nextId) {
+    showViewMode();
+    return;
+  }
+  state.selectedId = nextId;
+  if (els.charSelect) els.charSelect.value = nextId;
+  resetPicks();
+  syncEditor();
+  updateLeaders();
+}
+
+function syncDock() {
+  const keys = Object.keys(state.setup?.placements || {});
+  const index = Math.max(0, keys.indexOf(state.selectedId));
+  const ready = confirmReady();
+  const need = state.tool === "point"
+    ? 1
+    : (state.tool === "Ebene" && state.planeKind === "polyline" ? Math.max(3, state.picks.length || 3) : (PICK_MIN[state.tool] || 1));
+  const have = state.tool === "point" ? (placedMerkmal(state.selectedId) ? 1 : 0) : state.picks.length;
+  const doneCount = keys.filter((key) => placedMerkmal(key)).length;
+  if (els.assignBar) els.assignBar.style.width = keys.length ? `${(doneCount / keys.length) * 100}%` : "0";
+  if (els.assignSwatch) els.assignSwatch.style.background = state.selectedId ? colorForKey(state.selectedId) : "transparent";
+  if (els.pointSlots) {
+    els.pointSlots.replaceChildren();
+    for (let slot = 0; slot < Math.max(need, 1); slot += 1) {
+      const node = document.createElement("span");
+      node.className = slot < have ? "slot f" : "slot";
+      node.textContent = String(slot + 1);
+      els.pointSlots.append(node);
+    }
+  }
+  if (els.merkmalChips) {
+    els.merkmalChips.replaceChildren();
+    keys.forEach((key, chipIndex) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = `pill${key === state.selectedId ? " cur" : ""}${placedMerkmal(key) ? " done" : ""}`;
+      const dot = document.createElement("span");
+      dot.className = "dot";
+      dot.style.background = colorForKey(key);
+      const characteristic = characteristicFor(key);
+      button.append(dot, document.createTextNode(`${placedMerkmal(key) ? "✓ " : ""}${characteristic ? controlLabel(characteristic) : key}`));
+      button.addEventListener("click", () => {
+        state.selectedId = key;
+        if (els.charSelect) els.charSelect.value = key;
+        resetPicks();
+        markSelection();
+        syncEditor();
+        updateLeaders();
+      });
+      els.merkmalChips.append(button);
+      button.dataset.index = String(chipIndex);
+    });
+  }
+  for (const button of document.querySelectorAll("#type-seg [data-tool]")) {
+    button.classList.toggle("on", button.dataset.tool === state.tool);
+  }
+  const foot = state.setup?.placements?.[state.selectedId]?.anchor?.mode || "center";
+  for (const button of document.querySelectorAll("#foot-seg [data-foot]")) {
+    button.classList.toggle("on", button.dataset.foot === foot);
+  }
+  const size = state.setup?.placements?.[state.selectedId]?.labelSize || state.setup?.labelTemplate?.size || "M";
+  for (const button of document.querySelectorAll("#size-seg [data-size]")) {
+    button.classList.toggle("on", button.dataset.size === size);
+  }
+  const typeOn = Boolean(state.tool);
+  const pointsOn = typeOn && !ready;
+  if (els.blkType) {
+    els.blkType.classList.toggle("ok", typeOn && !pointsOn);
+    els.blkType.classList.toggle("act", !typeOn || pointsOn);
+  }
+  if (els.blkPoints) {
+    els.blkPoints.classList.toggle("dis", !typeOn);
+    els.blkPoints.classList.toggle("act", pointsOn);
+    els.blkPoints.classList.toggle("ok", ready);
+  }
+  if (els.blkFoot) els.blkFoot.classList.toggle("dis", !ready);
+  if (els.blkLabel) els.blkLabel.classList.toggle("dis", !ready);
+  if (els.blkFoot) els.blkFoot.classList.toggle("ok", ready);
+  if (els.blkLabel) els.blkLabel.classList.toggle("ok", ready);
+  if (els.assignConfirm) {
+    els.assignConfirm.disabled = !ready;
+    const sub = els.assignConfirm.querySelector(".sub");
+    const next = Math.min(index + 2, Math.max(keys.length, 1));
+    if (sub) sub.textContent = ready && doneCount >= keys.length ? "zur Ansicht" : `weiter zu Merkmal ${next}`;
+  }
+  if (els.confirmHint) els.confirmHint.textContent = ready ? "oder Enter drücken" : "erst Schritt 1 + 2 erledigen";
 }
 
 function syncEditor() {
@@ -3256,7 +3764,7 @@ function updateAssignHeader() {
   const pointMode = !els.tool || els.tool.value === "point";
   if (els.modePoint) els.modePoint.classList.toggle("is-on", pointMode);
   if (els.modeGeometry) els.modeGeometry.classList.toggle("is-on", !pointMode);
-  if (els.geometryTypeWrap) els.geometryTypeWrap.hidden = pointMode;
+  syncDock();
 }
 
 function toast(message) {

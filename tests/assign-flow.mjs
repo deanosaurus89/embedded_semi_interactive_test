@@ -17,7 +17,7 @@ function send(res, code, body, type) {
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, "http://127.0.0.1");
-  if (url.pathname === "/api/version") return send(res, 200, { name: "DL-Merkmal-Viewer", version: "0.9.0" });
+  if (url.pathname === "/api/version") return send(res, 200, { name: "DL-Merkmal-Viewer", version: "1.0.0" });
   if (url.pathname === "/api/settings") return send(res, 200, { server: "", tokenSet: false, pollSeconds: 60 });
   if (url.pathname === "/api/projects") {
     return send(res, 200, { total: 1, items: [{ id: "proj-1", name: "Projekt Eins", workspaceName: "Arbeitsbereich Eins" }] });
@@ -111,7 +111,11 @@ await page.waitForSelector("#assign-step");
 const step = await page.$eval("#assign-step", (el) => el.textContent);
 const name = await page.$eval("#assign-name", (el) => el.textContent);
 if (!step.includes("1 von 2") || !name.includes("Langloch 1 / Mating Length 1")) throw new Error(`Zuordnung falsch ${step} ${name}`);
-await page.waitForSelector("#timeline:not([hidden])");
+await page.click("#mode-view");
+await page.waitForFunction(() => {
+  const node = document.getElementById("timeline-total");
+  return node && !document.getElementById("timeline").hidden && node.textContent.includes("635");
+});
 const total = await page.$eval("#timeline-total", (el) => el.textContent);
 if (!total.includes("635")) throw new Error(`Zeitstrahl ${total}`);
 await page.screenshot({ path: path.join(dir, "zuordnung-zeitstrahl.png") });
