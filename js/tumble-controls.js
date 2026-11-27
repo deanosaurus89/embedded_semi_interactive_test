@@ -1,25 +1,20 @@
-// Screen-space tumble, pan and zoom. A horizontal drag is not stopped by a polar clamp.
 import * as THREE from "three";
+import { tumble } from "./tumble.js";
 
 export class TumbleControls {
   constructor(camera, dom) {
     this.camera = camera;
     this.dom = dom;
     this.enabled = true;
+    this.enableDamping = false;
+    this.screenSpacePanning = true;
     this.target = new THREE.Vector3();
-    this.mouseButtons = {
-      LEFT: THREE.MOUSE.ROTATE,
-      MIDDLE: THREE.MOUSE.PAN,
-      RIGHT: THREE.MOUSE.PAN,
-    };
-    this.pickSlop = 4;
+    this.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.PAN };
+    this.touches = { ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN };
     this.listeners = new Map();
     this.pointers = new Map();
     this.mode = null;
-    this.moved = false;
     this.last = { x: 0, y: 0, dist: 0 };
-    this.down = { x: 0, y: 0 };
-    this.raycaster = new THREE.Raycaster();
     this.onDown = this.onDown.bind(this);
     this.onMove = this.onMove.bind(this);
     this.onUp = this.onUp.bind(this);
@@ -30,13 +25,18 @@ export class TumbleControls {
   }
 
   addEventListener(type, fn) {
-    const list = this.listeners.get(type) || [];
+    const list = this.listeners.get(type) ?? [];
     list.push(fn);
     this.listeners.set(type, list);
   }
 
-  emit(type, event) {
-    for (const fn of this.listeners.get(type) || []) fn(event);
+  removeEventListener(type, fn) {
+    const list = this.listeners.get(type);
+    if (list) this.listeners.set(type, list.filter((item) => item !== fn));
+  }
+
+  emit(type) {
+    for (const fn of this.listeners.get(type) ?? []) fn();
   }
 
   update() {
@@ -51,25 +51,20 @@ export class TumbleControls {
     window.removeEventListener("pointerup", this.onUp);
   }
 
-  actionFor(button) {
-    const chosen = button === 0 ? this.mouseButtons.LEFT : button === 1 ? this.mouseButtons.MIDDLE : this.mouseButtons.RIGHT;
-    if (chosen === THREE.MOUSE.PAN) return "pan";
-    if (chosen === THREE.MOUSE.DOLLY) return "dolly";
-    if (chosen === THREE.MOUSE.ROTATE) return "rotate";
-    return null;
-  }
-
   onDown(event) {
     if (!this.enabled) return;
-    const action = this.actionFor(event.button);
-    if (!action) return;
     this.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
-    this.down = { x: event.clientX, y: event.clientY };
-    this.moved = false;
-    this.mode = action;
-    this.last = { x: event.clientX, y: event.clientY, dist: this.span() };
+    if (this.pointers.size === 1) {
+      const pan = event.button === 1 || event.button === 2;
+      this.mode = pan ? "pan" : "rotate";
+      this.last = { x: event.clientX, y: event.clientY, dist: 0 };
+    } else if (this.pointers.size === 2) {
+      this.mode = "dolly";
+      this.last.dist = this.span();
+    }
     window.addEventListener("pointermove", this.onMove);
     window.addEventListener("pointerup", this.onUp);
+    this.emit("start");
   }
 
   span() {
@@ -77,58 +72,54 @@ export class TumbleControls {
     return points.length >= 2 ? Math.hypot(points[0].x - points[1].x, points[0].y - points[1].y) : 0;
   }
 
+  mid() {
+    const points = [...this.pointers.values()];
+    return { x: (points[0].x + points[1].x) / 2, y: (points[0].y + points[1].y) / 2 };
+  }
+
   onMove(event) {
-    if (!this.enabled || !this.pointers.has(event.pointerId) || !this.mode) return;
+    if (!this.enabled || !this.pointers.has(event.pointerId)) return;
     const prev = this.pointers.get(event.pointerId);
     this.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
-    const travel = Math.hypot(event.clientX - this.down.x, event.clientY - this.down.y);
-    if (!this.moved && travel < this.pickSlop) return;
-    if (!this.moved) this.emit("start");
-    this.moved = true;
+    if (this.pointers.size >= 2) {
+      const dist = this.span();
+      if (this.last.dist > 1 && dist > 1) this.dolly(this.last.dist / dist);
+      const middle = this.mid();
+      if (this.last.x) this.pan(middle.x - this.last.x, middle.y - this.last.y);
+      this.last = { x: middle.x, y: middle.y, dist };
+      return;
+    }
     const dx = event.clientX - prev.x;
     const dy = event.clientY - prev.y;
     if (this.mode === "pan") this.pan(dx, dy);
-    else if (this.mode === "dolly") this.dollyToCursor(dy > 0 ? 1.04 : 0.96, event.clientX, event.clientY);
-    else this.rotate(dx, dy);
-    this.last = { x: event.clientX, y: event.clientY, dist: this.span() };
+    else if (this.mode === "rotate") this.rotate(dx, dy);
   }
 
   onUp(event) {
-    const wasClick = this.mode === "rotate" && !this.moved
-      && Math.hypot(event.clientX - this.down.x, event.clientY - this.down.y) < this.pickSlop;
     const had = this.mode != null;
     this.pointers.delete(event.pointerId);
-    if (this.pointers.size) return;
-    this.mode = null;
-    window.removeEventListener("pointermove", this.onMove);
-    window.removeEventListener("pointerup", this.onUp);
-    if (wasClick) this.emit("click", event);
-    else if (had && this.moved) this.emit("end");
+    if (!this.pointers.size) {
+      this.mode = null;
+      window.removeEventListener("pointermove", this.onMove);
+      window.removeEventListener("pointerup", this.onUp);
+      if (had) this.emit("end");
+    }
   }
 
   onWheel(event) {
     if (!this.enabled) return;
     event.preventDefault();
-    const scale = event.deltaY > 0 ? 1.08 : 0.92;
-    this.dollyToCursor(scale, event.clientX, event.clientY);
+    this.dolly(event.deltaY > 0 ? 1.08 : 0.92);
     this.emit("end");
   }
 
   rotate(dx, dy) {
     const height = this.dom.clientHeight || 600;
-    const yaw = (2 * Math.PI * dx) / height;
-    const pitch = (2 * Math.PI * dy) / height;
     const offset = this.camera.position.clone().sub(this.target);
-    const up = this.camera.up.clone().normalize();
-    const right = new THREE.Vector3().crossVectors(offset, up);
-    if (right.lengthSq() < 1e-10) return;
-    right.normalize();
-    const yawQ = new THREE.Quaternion().setFromAxisAngle(up, -yaw);
-    const pitchQ = new THREE.Quaternion().setFromAxisAngle(right, -pitch);
-    const turn = pitchQ.multiply(yawQ);
-    offset.applyQuaternion(turn);
-    this.camera.up.applyQuaternion(turn).normalize();
-    this.camera.position.copy(this.target).add(offset);
+    const up = this.camera.up.clone();
+    const turned = tumble(offset.toArray(), up.toArray(), (2 * Math.PI * dx) / height, (2 * Math.PI * dy) / height);
+    this.camera.up.set(turned.up[0], turned.up[1], turned.up[2]);
+    this.camera.position.copy(this.target).add(new THREE.Vector3(turned.offset[0], turned.offset[1], turned.offset[2]));
     this.camera.lookAt(this.target);
   }
 
@@ -145,32 +136,10 @@ export class TumbleControls {
     this.target.add(move);
   }
 
-  dollyToCursor(scale, clientX, clientY) {
-    const rect = this.dom.getBoundingClientRect();
-    const ndc = new THREE.Vector2(
-      ((clientX - rect.left) / rect.width) * 2 - 1,
-      -((clientY - rect.top) / rect.height) * 2 + 1,
-    );
-    this.camera.updateMatrixWorld();
-    const view = new THREE.Vector3();
-    this.camera.getWorldDirection(view);
-    const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(view, this.target);
-    this.raycaster.setFromCamera(ndc, this.camera);
-    const hit = new THREE.Vector3();
-    const offset = this.camera.position.clone().sub(this.target).multiplyScalar(scale);
-    if (offset.length() < 1e-3 || offset.length() > 1e7 || !this.raycaster.ray.intersectPlane(plane, hit)) {
-      if (offset.length() >= 1e-3 && offset.length() <= 1e7) this.camera.position.copy(this.target).add(offset);
-      return;
-    }
+  dolly(factor) {
+    const offset = this.camera.position.clone().sub(this.target).multiplyScalar(factor);
+    const distance = offset.length();
+    if (distance < 1e-4 || distance > 1e7) return;
     this.camera.position.copy(this.target).add(offset);
-    this.camera.updateMatrixWorld();
-    this.camera.lookAt(this.target);
-    this.raycaster.setFromCamera(ndc, this.camera);
-    const next = new THREE.Vector3();
-    if (!this.raycaster.ray.intersectPlane(plane, next)) return;
-    const shift = hit.sub(next);
-    this.camera.position.add(shift);
-    this.target.add(shift);
-    this.camera.lookAt(this.target);
   }
 }
