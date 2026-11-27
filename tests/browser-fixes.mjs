@@ -28,10 +28,17 @@ await page.click("#reconnect");
 await page.evaluate(() => {
   const view = document.getElementById("view");
   const rect = view.getBoundingClientRect();
-  const point = { x: rect.left + rect.width * 0.62, y: rect.top + rect.height * 0.48 };
-  const common = { bubbles: true, cancelable: true, clientX: point.x, clientY: point.y, button: 0, pointerId: 1 };
-  view.dispatchEvent(new PointerEvent("pointerdown", { ...common, buttons: 1 }));
-  view.dispatchEvent(new PointerEvent("pointerup", { ...common, buttons: 0 }));
+  for (let y = 0.25; y <= 0.8; y += 0.04) {
+    for (let x = 0.2; x <= 0.8; x += 0.04) {
+      const point = { x: rect.left + rect.width * x, y: rect.top + rect.height * y };
+      if (!window.__probe.hit(point.x, point.y)) continue;
+      const common = { bubbles: true, cancelable: true, clientX: point.x, clientY: point.y, button: 0, pointerId: 1 };
+      view.dispatchEvent(new PointerEvent("pointerdown", { ...common, buttons: 1 }));
+      view.dispatchEvent(new PointerEvent("pointerup", { ...common, buttons: 0 }));
+      return;
+    }
+  }
+  throw new Error("kein Treffer fuer die neue Linie");
 });
 const relinked = await page.evaluate(() => window.__probe.leaders());
 if (relinked < before.placements) throw new Error(`Linie nach Neuverbinden fehlt: ${relinked}`);
@@ -51,7 +58,7 @@ const tip = await page.evaluate(() => {
 });
 if (tip.hidden || !tip.text.includes("Istwert") || !tip.text.includes("Auftrag")) throw new Error(`Tooltip fehlt: ${tip.text}`);
 
-await page.click('[data-count="all"]');
+await page.$eval('[data-count="all"]', (el) => el.click());
 const full = await page.$eval('.flag[data-id="zyl-a-dm"]', (node) => Number(node.getAttribute("data-n")));
 await page.$eval("#filter-from", (el) => {
   el.value = "2026-11-01";

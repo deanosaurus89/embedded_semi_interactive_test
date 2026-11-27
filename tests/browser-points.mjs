@@ -129,12 +129,26 @@ await page.evaluate((view) => {
   document.getElementById("flags").style.visibility = "hidden";
   window.__probe.look(view.position, view.target);
 }, savedView);
-const planeScreens = await page.evaluate(() => window.__probe.gridPlane(4));
-if (planeScreens.length < 4) throw new Error(`nur ${planeScreens.length} ebene Knoten im Blick`);
 await page.select("#tool", "Ebene");
-for (const point of planeScreens) await page.mouse.click(point.x, point.y);
-await page.waitForFunction(() => window.__probe.preview?.type === "Ebene" && window.__probe.preview.form < 0.05);
-const plane = await page.evaluate(() => window.__probe.summary());
+let plane = null;
+for (let shift = 0; shift < 40 && !plane; shift += 8) {
+  const planeScreens = await page.evaluate((origin) => window.__probe.gridPlane(4, origin), shift);
+  if (planeScreens.length < 4) continue;
+  await page.evaluate(() => document.querySelector("#fit-cancel")?.click());
+  for (const point of planeScreens) {
+    await page.evaluate((point) => {
+      const view = document.getElementById("view");
+      const common = { bubbles: true, cancelable: true, clientX: point.x, clientY: point.y, button: 0, pointerId: 1 };
+      view.dispatchEvent(new PointerEvent("pointerdown", { ...common, buttons: 1 }));
+      view.dispatchEvent(new PointerEvent("pointerup", { ...common, buttons: 0 }));
+    }, point);
+  }
+  plane = await page.evaluate(() => {
+    const preview = window.__probe.preview;
+    return preview?.type === "Ebene" && preview.form < 0.05 ? window.__probe.summary() : null;
+  });
+}
+if (!plane) throw new Error("keine ebene Flaeche im Blick");
 
 console.log(JSON.stringify({ cylinder, circle, plane, pageErrors: failures }, null, 2));
 await browser.close();

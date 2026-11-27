@@ -42,7 +42,7 @@ The page fills whatever size the iframe gets. It does not try to leave the frame
 
 ## Local DataLoop helper
 
-[`local-server/README.md`](local-server/README.md) (German) describes the one file Martin double-clicks: `local-server/DL-Merkmal-Viewer.cmd`. It installs itself under `%LOCALAPPDATA%\DL-Merkmal-Viewer\`, serves this page on `http://localhost:8765/`, and exposes a localhost-only GET API for project search, templates or unlinked pieces, reference models, and controls. Server URL and token are entered in the browser and stored only on that PC. No server URL or token is stored in the repo. The public page keeps the Milkyway example and shows a note to start the helper. Version 0.8.0 loads live values only for the saved view, keeps the last response if DataLoop is briefly offline, and shows that time in the header. The DataLoop embed on that PC is:
+[`local-server/README.md`](local-server/README.md) (German) describes the one file Martin double-clicks: `local-server/DL-Merkmal-Viewer.cmd`. It installs itself under `%LOCALAPPDATA%\DL-Merkmal-Viewer\`, serves this page on `http://localhost:8765/`, and exposes a localhost-only GET API for project search, templates or unlinked pieces, reference models, and controls. Server URL and token are entered in the browser and stored only on that PC. No server URL or token is stored in the repo. The public page keeps the Milkyway example and shows a note to start the helper. Version 1.0.0 keeps that live view, adds the step bar and bottom editor from the approved mockup, and shows measured parts per month. The header shows the version. The DataLoop embed on that PC is:
 
 ```html
 <iframe src="http://localhost:8765/" title="Milkyway Merkmale"></iframe>

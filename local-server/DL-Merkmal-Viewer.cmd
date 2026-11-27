@@ -6,7 +6,7 @@ exit /b
 $ErrorActionPreference = 'Stop'
 if (-not $env:LOCALAPPDATA) { $env:LOCALAPPDATA = [IO.Path]::GetTempPath() }
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
-$Script:Version = '0.9.0'
+$Script:Version = '1.0.0'
 $Script:AppDir = Join-Path $env:LOCALAPPDATA 'DL-Merkmal-Viewer'
 $Script:SettingsFile = Join-Path $Script:AppDir 'settings.json'
 $Script:CacheDir = Join-Path $Script:AppDir 'cache'
@@ -784,6 +784,7 @@ function Handle-Api($ctx, [string]$Method, [string]$Path) {
     } else { $file = Ensure-ModelFile $hash }
     $ctx.Response.StatusCode = 200
     $ctx.Response.ContentType = 'model/obj'
+    $ctx.Response.ContentLength64 = (Get-Item -LiteralPath $file).Length
     $ctx.Response.Headers['Cache-Control'] = 'public, max-age=86400'
     $fs = [IO.File]::OpenRead($file)
     try { $fs.CopyTo($ctx.Response.OutputStream) } finally { $fs.Close() }
@@ -1104,7 +1105,12 @@ function Invoke-SelfTest {
   try { $ctx.Response.OutputStream.Close() } catch {}
   $body = $task.Result.Content.ReadAsStringAsync().Result
   $listener.Stop(); $listener.Close()
-  if ($body -notmatch '"version":"0.9.0"') { throw "Version falsch: $body" }
+  if ($body -notmatch '"version":"1.0.0"') { throw "Version falsch: $body" }
+  $Script:MockJson = { param($Url) return '{"value":[{"creationDateUser":"2025-03-02T00:00:00Z"},{"creationDateUser":"2025-03-18T00:00:00Z"},{"creationDateUser":"2025-08-11T00:00:00Z"}]}' }
+  $tl = Get-Timeline @{ project = 'proj-1'; template = 'tpl-1' }
+  if ([int]$tl.total -ne 3) { throw 'Zeitstrahl zaehlt falsch' }
+  $days = @($tl.buckets)
+  if ($days.Count -lt 2) { throw 'Zeitstrahl ohne Tage' }
   $viewRoot = Join-Path ([IO.Path]::GetTempPath()) ('dl-views-' + [guid]::NewGuid().ToString('N'))
   $Script:AppDir = $viewRoot
   $viewJson = '{"schemaVersion":2,"name":"ansicht-1","projectId":"proj-alpha","templateId":"tpl-1","pieceId":null,"models":[{"name":"Gehaeuse.prt","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","enabled":true}],"labelSize":"small","controls":[{"id":"ctl-1","objectName":"Objekt 1","name":"Merkmal A","color":"#2456b5","selected":true}],"placements":{"ctl-1":{"color":"#2456b5","anchor":{"kind":"geometry","geometryId":"geo-1","mode":"contour","point":{"x":1,"y":2,"z":3}}}},"geometries":[],"camera":null}'
